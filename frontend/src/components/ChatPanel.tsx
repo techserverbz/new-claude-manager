@@ -31,6 +31,37 @@ function contentBlocks(event: RawStreamEvent): StreamContentBlock[] {
   )
 }
 
+/** Whether two fetched histories are the same (id + text + tool count). Lets an
+    idle poll keep the SAME array reference so React skips the re-render — a churned
+    list otherwise disturbs the user's scroll position mid-read. */
+function sameMessages(a: ChatMessage[], b: ChatMessage[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].id !== b[i].id) return false
+    if (a[i].content !== b[i].content) return false
+    if ((a[i].toolUse?.length ?? 0) !== (b[i].toolUse?.length ?? 0)) return false
+  }
+  return true
+}
+
+/** Whether `next` is a strict PREFIX of `prev` (same ids, fewer of them). That is
+    the exact signature of a torn read — the shell appended a line the server read
+    mid-write, so parseLines dropped the trailing message and the count came back
+    one short. We ignore such a background refetch so the history never flickers
+    N↔N-1. A genuine in-place shrink (compaction) changes the HEAD, not a clean
+    prefix, so it is NOT caught here; a real session switch replaces the list via
+    the session-change effect, which bypasses this guard entirely. */
+function isTornPrefix(prev: ChatMessage[], next: ChatMessage[]): boolean {
+  if (next.length >= prev.length) return false
+  // an empty read while we already hold messages is a fully-torn/truncated read
+  // (session JSONL is append-only, so it never legitimately empties in place)
+  if (next.length === 0) return true
+  for (let i = 0; i < next.length; i++) {
+    if (next[i].id !== prev[i].id) return false
+  }
+  return true
+}
+
 function ToolChip({ tool }: { tool: ToolUse }) {
   const [open, setOpen] = useState(false)
   const hasInput = tool.input !== undefined && tool.input !== null
@@ -148,9 +179,14 @@ export function ChatPanel({
   const projectIdRef = useRef(project.id)
   const sessionIdRef = useRef(sessionId)
   const scrollRef = useRef<HTMLDivElement>(null)
-  /* when set, the next messages render scrolls to the TOP (not the foot) — used
-     on open / becoming visible so a chat view always opens at the start. */
-  const scrollTopPendingRef = useRef(false)
+  /* when set, the next messages render jumps to the FOOT (latest) — used on open /
+     becoming visible so a chat view always opens on the most recent message, like
+     a normal chat (you then scroll UP for history). */
+  const scrollBottomPendingRef = useRef(false)
+  /* whether the user is parked at the foot. Updated from real scroll events (not
+     recomputed per render), so auto-follow only happens when they're already at
+     the bottom — scrolling up to read is never yanked back down. */
+  const pinnedToBottomRef = useRef(true)
   /* the live turn mirrored into refs: WS events can arrive faster than
      React re-renders, so the `done` fallback must not read render-scope
      state (it would miss the last delta(s)/tool uses) */
@@ -181,7 +217,20 @@ export function ChatPanel({
     async (sid: string) => {
       try {
         const fetched = await api.getMessages(project.id, sid)
-        setMessages(fetched)
+        /* a session switch happened while this fetch was in flight — drop the
+           stale result so two fetchers on different ids can't alternate histories */
+        if (sessionIdRef.current !== sid) return false
+        setMessages((prev) => {
+          /* keep the same array (skip the re-render) when nothing changed, so the
+             steady poll never jostles the scroll position while you're reading */
+          if (sameMessages(prev, fetched)) return prev
+          /* a background refetch that came back a strict prefix is a torn read
+             (the shell was mid-append) — ignore it so the last message never
+             flickers out and back, jolting the scroll. Real growth / content
+             changes / a genuine non-prefix shrink still flow through. */
+          if (isTornPrefix(prev, fetched)) return prev
+          return fetched
+        })
         return true
       } catch {
         return false
@@ -199,8 +248,8 @@ export function ChatPanel({
       setMessages([])
       return
     }
-    /* a different chat just opened here — show it from the top */
-    scrollTopPendingRef.current = true
+    /* a different chat just opened here — land on its latest message */
+    scrollBottomPendingRef.current = true
     let cancelled = false
     api
       .getMessages(project.id, sessionId)
@@ -223,8 +272,8 @@ export function ChatPanel({
     const becameActive = active && !wasActiveRef.current
     wasActiveRef.current = active
     if (becameActive && sessionId !== null && !streamingRef.current) {
-      /* the chat view just came on screen — open it at the top */
-      scrollTopPendingRef.current = true
+      /* the chat view just came on screen — land on its latest message */
+      scrollBottomPendingRef.current = true
       void loadMessages(sessionId)
     }
   }, [active, sessionId, loadMessages])
@@ -248,7 +297,11 @@ export function ChatPanel({
   useEffect(() => {
     if (!active || sessionId === null) return
     const id = window.setInterval(() => {
-      if (!streamingRef.current) void loadMessages(sessionId)
+      /* read the live id from the ref — the same source the sessions-updated
+         watcher uses — so a stale prop in this closure can't make the poll fetch
+         a different session and alternate two histories */
+      const sid = sessionIdRef.current
+      if (sid !== null && !streamingRef.current) void loadMessages(sid)
     }, 2500)
     return () => window.clearInterval(id)
   }, [active, sessionId, loadMessages])
@@ -378,17 +431,37 @@ export function ChatPanel({
     return chatSocket.subscribe((ev) => handlerRef.current?.(ev))
   }, [])
 
-  /* — scroll: open at the TOP on first load/visibility, else follow the foot — */
+  /* — track whether the user is parked at the foot, from REAL scroll events.
+       This drives auto-follow: while pinned, new messages keep the view at the
+       latest; once they scroll up, we leave them alone (no yank-back). — */
   useEffect(() => {
     const el = scrollRef.current
     if (el === null) return
-    if (scrollTopPendingRef.current) {
-      scrollTopPendingRef.current = false
-      el.scrollTop = 0
+    const onScroll = () => {
+      pinnedToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [])
+
+  /* — scroll: open on the latest message (foot) on first load / becoming visible /
+       session change; otherwise follow the foot only while the user is pinned
+       there. Scrolling up to read history is never interrupted. — */
+  useEffect(() => {
+    const el = scrollRef.current
+    if (el === null) return
+    if (scrollBottomPendingRef.current) {
+      scrollBottomPendingRef.current = false
+      pinnedToBottomRef.current = true
+      el.scrollTop = el.scrollHeight
+      /* a late layout pass (font/wrap settle) can grow the height a frame later */
+      requestAnimationFrame(() => {
+        const e2 = scrollRef.current
+        if (e2 !== null) e2.scrollTop = e2.scrollHeight
+      })
       return
     }
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120
-    if (nearBottom) el.scrollTop = el.scrollHeight
+    if (pinnedToBottomRef.current) el.scrollTop = el.scrollHeight
   }, [messages, committedText, deltaText, liveTools, isStreaming])
 
   const handleSend = () => {

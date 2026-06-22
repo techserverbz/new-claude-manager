@@ -60,6 +60,24 @@ function stripMouseTracking(s: string): string {
   })
 }
 
+/* the button/drag/any-motion tracking modes (the ones that decide whether the app
+   captures the mouse). Encodings (1006/1015) don't change "does the app want
+   mouse", so they're excluded from intent detection. */
+const MOUSE_TRACK_MODES = new Set([1000, 1002, 1003])
+/** The app's LATEST mouse-tracking intent in a chunk ('enable' on ?1003h etc,
+    'disable' on ?1003l), or null if it didn't toggle. Drives wheel forwarding:
+    we strip the enable from xterm (so drag-select works) but the app on the pty
+    still wants mouse, so a wheel must be sent to it as a mouse report to scroll. */
+function detectMouseIntent(s: string): 'enable' | 'disable' | null {
+  let intent: 'enable' | 'disable' | null = null
+  for (const m of s.matchAll(/\x1b\[\?([\d;]+)([hl])/g)) {
+    if (m[1].split(';').some((p) => MOUSE_TRACK_MODES.has(Number(p)))) {
+      intent = m[2] === 'h' ? 'enable' : 'disable'
+    }
+  }
+  return intent
+}
+
 function readToken(name: string, fallback: string): string {
   const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
   return value !== '' ? value : fallback
@@ -282,9 +300,17 @@ export function TerminalPanel({
        (one terminal instance == one socket). */
     let mouseCarry = ''
     let mouseFlushTimer: number | undefined
+    /* whether the running app (claude's TUI) has mouse tracking ON. We strip the
+       enable so xterm does local drag-select, but track the intent here so the
+       wheel handler can forward scroll to the app (its history has no xterm
+       scrollback to fall back on while it owns the alt-screen). */
+    let appWantsMouse = false
     const writeSanitized = (data: string) => {
       window.clearTimeout(mouseFlushTimer)
-      let text = stripMouseTracking(mouseCarry + data)
+      const raw = mouseCarry + data
+      const intent = detectMouseIntent(raw)
+      if (intent !== null) appWantsMouse = intent === 'enable'
+      let text = stripMouseTracking(raw)
       mouseCarry = ''
       const from = Math.max(0, text.length - CSI_TAIL_WINDOW)
       const tail = text.slice(from).match(CSI_TAIL_RE)
@@ -300,6 +326,34 @@ export function TerminalPanel({
       }
       if (text !== '') term.write(text)
     }
+
+    /* Wheel scroll. Because we strip mouse tracking from xterm (so drag-select
+       works), the wheel no longer reaches claude — and while claude owns the
+       alt-screen xterm has no scrollback to scroll either, so the terminal felt
+       "stuck". When the app wants mouse, translate the wheel into the SGR
+       mouse-wheel reports it expects (button 64 up / 65 down) so its own history
+       scrolls; otherwise let xterm scroll its scrollback normally. */
+    term.attachCustomWheelEventHandler((e) => {
+      if (!appWantsMouse) return true
+      if (ws === null || ws.readyState !== WebSocket.OPEN) return true
+      const button = e.deltaY < 0 ? 64 : 65
+      let col = 1
+      let row = 1
+      const el = term.element
+      if (el !== undefined) {
+        const r = el.getBoundingClientRect()
+        if (r.width > 0 && r.height > 0) {
+          col = Math.min(term.cols, Math.max(1, Math.floor(((e.clientX - r.left) / r.width) * term.cols) + 1))
+          row = Math.min(term.rows, Math.max(1, Math.floor(((e.clientY - r.top) / r.height) * term.rows) + 1))
+        }
+      }
+      /* a notch is ~100px; send a few wheel reports per notch for a natural pace */
+      const ticks = Math.min(5, Math.max(1, Math.round(Math.abs(e.deltaY) / 40)))
+      let seq = ''
+      for (let i = 0; i < ticks; i++) seq += `\x1b[<${button};${col};${row}M`
+      ws.send(JSON.stringify({ type: 'input', data: seq }))
+      return false
+    })
 
     /* the connect is deferred a tick so StrictMode's probe mount never
        opens a socket (which would spawn-and-kill a stray server pty,

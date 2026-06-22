@@ -391,6 +391,38 @@ function parseLines(text) {
   return out
 }
 
+/** True when the LAST non-empty line of `text` is not valid JSON — i.e. the shell
+    caught the file mid-append. parseLines would silently drop that line, so the
+    message count momentarily reads one short (N-1), which makes the chat history
+    "flicker"/toggle. We use this to re-read once and let the write settle. */
+function hasTornFinalLine(text) {
+  const lines = text.split(/\r?\n/)
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const trimmed = lines[i].trim()
+    if (trimmed === '') continue
+    try {
+      JSON.parse(trimmed)
+      return false
+    } catch {
+      return true
+    }
+  }
+  return false
+}
+
+/** Read a session transcript, tolerating a torn final line. The interactive shell
+    holds the JSONL open and appends incrementally; a concurrent read can land
+    mid-write. If the last line is partial, wait a beat and re-read once so the
+    count doesn't oscillate N↔N-1 between polls. */
+async function readSessionTextStable(filePath) {
+  let text = await fsp.readFile(filePath, 'utf8')
+  if (hasTornFinalLine(text)) {
+    await new Promise((r) => setTimeout(r, 40))
+    text = await fsp.readFile(filePath, 'utf8')
+  }
+  return text
+}
+
 const ANSI_RE = new RegExp("[\\u001B\\u009B][[\\]()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]", 'g')
 function stripAnsi(text) {
   return String(text).replace(ANSI_RE, '')
@@ -937,7 +969,7 @@ export async function getSessionMessages(project, sessionId) {
   const filePath = path.join(sessionsDirFor(project), `${sessionId}.jsonl`)
   let text
   try {
-    text = await fsp.readFile(filePath, 'utf8')
+    text = await readSessionTextStable(filePath)
   } catch {
     return null // session not found
   }
