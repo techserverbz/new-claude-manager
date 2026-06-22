@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="New Claude Manager">
+  <!-- midnight instrument plate -->
+  <rect x="1" y="1" width="30" height="30" rx="6.5" fill="#0f0f0f"/>
+  <rect x="1.75" y="1.75" width="28.5" height="28.5" rx="5.75" fill="none" stroke="#b7891e" stroke-opacity="0.55" stroke-width="1"/>
+  <!-- brass four-point star (the ✦ motif) -->
+  <path d="M16 3 L18.8 13.2 L29 16 L18.8 18.8 L16 29 L13.2 18.8 L3 16 L13.2 13.2 Z" fill="#d4a437"/>
+</svg>

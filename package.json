@@ -1,0 +1,16 @@
+{
+  "name": "claude-manager",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "server"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c green,cyan \"npm run dev -w server\" \"npm run dev -w frontend\"",
+    "typecheck": "tsc --noEmit -p frontend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

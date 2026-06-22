@@ -1,0 +1,372 @@
+@import 'tailwindcss';
+
+/* ————————————————————————————————————————————————————————————
+   Christopher OS — 1Cal “Manifesto” (Landing L)
+   Cream observatory paper by day, midnight paper by night.
+   Brass accents, hairline rules, 14px plates.
+   STRICT SINGLE-FONT SYSTEM: Space Grotesk for everything.
+   ———————————————————————————————————————————————————————————— */
+
+/* — light (default): cream observatory paper — */
+:root {
+  --p-bg: #f4ecda;
+  --p-bg2: #efe5cc;
+  --p-surface: #f0e7d2;
+  --p-surface2: #e5d9b8;
+  --p-text: #1a1611;
+  --p-text2: #2a241b;
+  --p-text-dim: #6b5f45;
+  --p-text-faint: #978971;
+  --p-accent: #b7891e;
+  --p-accent-deep: #8b6814;
+  --p-line: rgba(26, 22, 17, 0.18);
+  --p-line-soft: rgba(26, 22, 17, 0.1);
+  --p-glow: rgba(183, 137, 30, 0.12);
+  --p-selection: rgba(183, 137, 30, 0.3);
+  --p-nebula-wash: rgba(26, 22, 17, 0.04);
+  --halo-shadow: 0 1px 0 var(--p-text2);
+}
+
+/* — dark: the midnight manifesto — */
+.dark {
+  --p-bg: #0a0a0a;
+  --p-bg2: #141414;
+  --p-surface: #0f0f0f;
+  --p-surface2: #1a1a1a;
+  --p-text: #e8dcc0;
+  --p-text2: #f2e6c2;
+  --p-text-dim: #9c9180;
+  --p-text-faint: #6e6657;
+  --p-accent: #d4a437;
+  --p-accent-deep: #b7891e;
+  --p-line: rgba(255, 255, 255, 0.18);
+  --p-line-soft: rgba(255, 255, 255, 0.1);
+  --p-glow: rgba(212, 164, 55, 0.14);
+  --p-selection: rgba(212, 164, 55, 0.3);
+  --p-nebula-wash: rgba(255, 255, 255, 0.04);
+  --halo-shadow:
+    0 0 22px rgba(0, 0, 0, 0.95),
+    0 0 8px rgba(0, 0, 0, 1);
+}
+
+@theme inline {
+  /* — palette (theme-swapped via :root / .dark above) — */
+  --color-midnight: var(--p-bg); /* paper */
+  --color-midnight-2: var(--p-bg2); /* chrome strips */
+  --color-surface: var(--p-surface); /* sidebar / panel surface */
+  --color-surface-2: var(--p-surface2); /* secondary surface */
+  --color-parchment: var(--p-text); /* primary ink */
+  --color-parchment-2: var(--p-text2); /* brighter ink / star specks */
+  --color-sand: var(--p-text-dim); /* subcopy */
+  --color-sand-dim: var(--p-text-faint); /* faint meta (decorative, aria-hidden uses) */
+  --color-brass: var(--p-accent); /* the accent */
+  --color-brass-deep: var(--p-accent-deep); /* strip labels, deep accent */
+  --color-glow: var(--p-glow); /* nebula center */
+
+  /* — hairlines (also usable as border-hairline / bg-hairline) — */
+  --color-hairline: var(--p-line);
+  --color-hairline-s: var(--p-line-soft);
+
+  /* — type: ONE font, everywhere — */
+  --font-display: 'Space Grotesk', 'Helvetica Neue', Arial, sans-serif;
+  --font-ui: 'Space Grotesk', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'Space Grotesk', 'Helvetica Neue', Arial, sans-serif;
+}
+
+/* ————————————————— base ————————————————— */
+
+html,
+body,
+#root {
+  height: 100%;
+  /* a full-screen app — the page itself never scrolls; panels scroll inside */
+  overflow: hidden;
+}
+
+html {
+  background: var(--color-midnight);
+}
+
+body {
+  background: var(--color-midnight);
+  color: var(--color-parchment);
+  font-family: var(--font-display);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--p-selection);
+  color: var(--color-parchment-2);
+}
+
+/* ————————————————— scrollbars —————————————————
+   Thin, theme-aware, overlay-style: a faint hairline track and a
+   sand thumb that warms to brass under the hand. Replaces the stock
+   OS scrollbar (which clashed badly with the cream/midnight paper). */
+
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-sand-dim) transparent;
+}
+
+/* WebKit / Chromium */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: var(--color-sand-dim);
+  border: 3px solid transparent; /* inset the thumb so it reads as embedded */
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--color-brass);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* opt-out: a strip that can scroll horizontally (the session tab bar) but must
+   NOT show a bar — it scrolls via wheel/trackpad when tabs overflow */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+/* visible keyboard focus — a brass instrument line */
+:focus-visible {
+  outline: 2px solid var(--color-brass);
+  outline-offset: 3px;
+}
+/* text fields show focus via their own brass BORDER (focus / focus-within), so
+   suppress the extra brass outline on them — otherwise focusing e.g. the search
+   box shows two stacked brass highlights */
+input:focus-visible,
+textarea:focus-visible {
+  outline: none;
+}
+
+/* ————————————————— ambience layers ————————————————— */
+
+/* nebula — central brass glow + faint wash top-left (Landing L);
+   the wash is tokenized so light mode gets ink over cream, not white */
+.mo-nebula {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(900px 600px at 50% 38%, var(--color-glow), transparent 65%),
+    radial-gradient(600px 500px at 12% 18%, var(--p-nebula-wash), transparent 60%);
+}
+
+/* grain — 4px-pitch ink dot lattice reading as paper grain */
+.mo-grain {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: radial-gradient(circle at 1px 1px, var(--color-parchment) 1px, transparent 0);
+  background-size: 4px 4px;
+  opacity: 0.06;
+  mix-blend-mode: overlay;
+}
+
+/* a single twinkling star speck (size/position/timing set inline) */
+.mo-star {
+  position: absolute;
+  border-radius: 50%;
+  background: var(--color-parchment-2);
+  opacity: 0.35;
+  animation-name: mo-twinkle;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+}
+
+/* ————————————————— signature treatments ————————————————— */
+
+/* brass corner-bracket hover + gentle lift (Landing L card idiom).
+   ::before pins top-left, ::after pins bottom-right; both fade in.
+   16px brackets with 14px-rounded outer corners to match the card radius. */
+.mo-ticks {
+  position: relative;
+  border-radius: 14px;
+  transition:
+    border-color 240ms ease,
+    color 240ms ease,
+    transform 240ms ease;
+}
+
+.mo-ticks::before,
+.mo-ticks::after {
+  content: '';
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 240ms ease;
+}
+
+.mo-ticks::before {
+  top: 0;
+  left: 0;
+  border-top: 1px solid var(--color-brass);
+  border-left: 1px solid var(--color-brass);
+  border-top-left-radius: 14px;
+}
+
+.mo-ticks::after {
+  bottom: 0;
+  right: 0;
+  border-bottom: 1px solid var(--color-brass);
+  border-right: 1px solid var(--color-brass);
+  border-bottom-right-radius: 14px;
+}
+
+.mo-ticks:hover,
+.mo-ticks:focus-visible {
+  transform: translateY(-2px);
+}
+
+.mo-ticks:hover::before,
+.mo-ticks:hover::after,
+.mo-ticks:focus-visible::before,
+.mo-ticks:focus-visible::after {
+  opacity: 1;
+}
+
+/* ghost CTA — transparent, hairline, square; fills brass on hover */
+.mo-button {
+  display: inline-block;
+  background: transparent;
+  color: var(--color-parchment);
+  border: 1px solid var(--color-hairline);
+  border-radius: 0;
+  padding: 14px 24px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition:
+    border-color 200ms ease,
+    color 200ms ease,
+    background 200ms ease;
+}
+
+.mo-button:hover {
+  background: var(--color-brass);
+  color: var(--color-midnight);
+  border-color: var(--color-brass);
+}
+
+/* soft brass aura behind the celestial sphere */
+.mo-sphere-glow {
+  background: radial-gradient(closest-side, var(--color-glow), transparent 70%);
+}
+
+/* 64×1 brass rule under section headings */
+.mo-rule {
+  display: block;
+  width: 64px;
+  height: 1px;
+  background: var(--color-brass);
+  margin: 18px auto 0;
+}
+
+/* signature badge — transparent, brass hairline, mono uppercase */
+.mo-badge {
+  display: inline-block;
+  background: transparent;
+  border: 1px solid var(--color-brass);
+  border-radius: 0;
+  color: var(--color-brass);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  padding: 4px 12px;
+}
+
+/* observation card — TRANSPARENT plate letting the midnight paper +
+   nebula show through (Landing L); border warms to brass under the
+   hand (pairs with .mo-ticks) */
+.mo-card {
+  background: transparent;
+  border: 1px solid var(--color-hairline);
+  border-radius: 14px;
+  padding: 26px 26px 22px;
+}
+
+.mo-card:hover,
+.mo-card:focus-visible {
+  border-color: var(--color-brass);
+}
+
+/* halo that keeps the sphere's glow from eating heading text —
+   dark: black glow; light: 1px cream emboss (per Landing L) */
+.mo-halo {
+  position: relative;
+  z-index: 11;
+  text-shadow: var(--halo-shadow);
+}
+
+/* live shell marker — the ONE sanctioned non-token color: a semantic green
+   status dot (matching claudecodeui's live indicator), solid (no blink) */
+.mo-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  background: #22c55e;
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.75);
+  flex-shrink: 0;
+}
+
+/* ————————————————— keyframes ————————————————— */
+
+@keyframes mo-twinkle {
+  0%,
+  100% {
+    opacity: 0.2;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
+@keyframes mo-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* ————————————————— reduced motion ————————————————— */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
