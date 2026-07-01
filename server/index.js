@@ -1143,8 +1143,10 @@ server.on('upgrade', (req, socket, head) => {
     const projectId = url.searchParams.get('projectId') || ''
     const sessionId = url.searchParams.get('sessionId') || 'new'
     const forceRestart = url.searchParams.get('forceRestart') === '1'
+    const cols = Math.floor(Number(url.searchParams.get('cols')))
+    const rows = Math.floor(Number(url.searchParams.get('rows')))
     terminalWss.handleUpgrade(req, socket, head, (ws) => {
-      handleTerminalConnection(ws, { project: getProject(projectId), sessionId, forceRestart })
+      handleTerminalConnection(ws, { project: getProject(projectId), sessionId, forceRestart, cols, rows })
     })
   } else {
     socket.destroy()
@@ -1166,7 +1168,17 @@ function sendTo(ws, frame) {
 }
 
 function broadcast(frame) {
-  for (const client of chatClients) sendTo(client, frame)
+  // Snapshot first: a sendTo that triggers a synchronous close would mutate
+  // chatClients mid-iteration. try/catch each so one wedged socket can't abort
+  // the fan-out and silently orphan every client after it (which would need a
+  // server restart to clear).
+  for (const client of [...chatClients]) {
+    try {
+      sendTo(client, frame)
+    } catch {
+      /* a wedged socket must never kill the broadcast loop */
+    }
+  }
 }
 
 const watchers = createSessionWatchers({ sessionsDirFor, broadcast })

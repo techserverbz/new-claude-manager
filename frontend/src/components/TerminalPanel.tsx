@@ -21,61 +21,47 @@ import '@xterm/xterm/css/xterm.css'
  * faces that exist on Windows (Cascadia, Consolas) so it never falls
  * to Courier New.
  *
+ * Output is written near-verbatim — the only transform is stripping claude's
+ * mouse-tracking modes so a plain drag forms a text selection for right-click
+ * Copy (otherwise xterm hands the drag to claude). A NARROW carry holds back
+ * only a partial private-mode set across WS frames; it never touches cursor-
+ * positioning CSI. On xterm 5.5 this is the misalignment fix: the old code used
+ * a BROAD CSI carry that split claude's constant positioning mid-sequence and
+ * sheared the grid, and xterm 6's cell measurement compounded it.
+ *
  * The session binding is captured ONCE per connection: a sessionId
- * prop change must not tear down a live pty mid-use (e.g. when
- * session-created lands while a fresh chat is streaming). Reconnect
- * picks up the latest id.
+ * prop change must not tear down a live pty mid-use. Reconnect picks up
+ * the latest id.
  */
 
-const TERMINAL_INIT_DELAY_MS = 100
-const TERMINAL_RESIZE_DELAY_MS = 50
+/* how long the connect (and first fit) is deferred after mount — long enough for
+   xterm's renderer to initialize (so the first fit doesn't throw) and past
+   StrictMode's synchronous probe mount. */
+const TERMINAL_INIT_DELAY_MS = 60
 
-/* Mouse-tracking sanitization. The claude TUI enables xterm mouse tracking
-   (DECSET ?1000/?1002/?1003 + ?1006 encoding). xterm 6's mousedown gate is
-   `!areMouseEventsActive || shouldForceSelection(ev)`, so with mouse tracking on
-   a plain left drag is handed to the app instead of forming a text selection —
-   nothing highlights, term.getSelection() is empty, and right-click Copy has
-   nothing to copy. Stripping these private modes from the output stream keeps
-   xterm's mouse protocol at NONE, so a normal drag selects text and Copy works.
-   Only the mouse modes below are removed; alt-screen (?1049), bracketed paste
-   (?2004), cursor visibility (?25) etc. pass through untouched. (Manager 26 used
-   the same stream-sanitization pattern — it stripped alt-screen — which is why
-   selection worked there before xterm 6 / the newer claude TUI.) */
-const MOUSE_PRIVATE_MODES = new Set([1000, 1001, 1002, 1003, 1004, 1005, 1006, 1015])
+/* Drop ONLY the mouse-tracking modes (1000-1003/1005/1006/1015) from claude's
+   output: that keeps xterm out of mouse mode, so a plain left-drag forms a TEXT
+   selection for the right-click Copy instead of being handed to claude. claude
+   keeps its native alt-screen (clean full-screen rendering — stripping it gains
+   nothing here since this claude redraws in place rather than scrolling). Cursor
+   visibility (?25), bracketed paste (?2004), focus reporting (?1004), alt-screen
+   (?1049) etc. all pass through untouched. */
+const STRIP_MODES = new Set([1000, 1001, 1002, 1003, 1005, 1006, 1015])
 /* any private-mode set: ESC [ ? <params> (h|l) — params may batch several modes */
 const PRIVATE_MODE_SET_RE = /\x1b\[\?([\d;]+)([hl])/g
-/* a trailing INCOMPLETE CSI (ESC, ESC[, ESC[?, ESC[<params>, ESC[?<params>) — held
-   back across WS frames so a mouse sequence ConPTY split mid-CSI can't slip the
-   filter. Checked only over the tail (mouse sets are short), so a longer non-mouse
-   CSI that isn't carried is harmless: xterm reassembles partial writes itself. */
-const CSI_TAIL_RE = /\x1b(?:\[\??[\d;]*)?$/
-const CSI_TAIL_WINDOW = 64
+/* a trailing INCOMPLETE private-mode set (ESC, ESC[, ESC[?, ESC[?<params>) — held
+   back across WS frames so a mode sequence ConPTY split mid-CSI isn't missed. It
+   matches ONLY the ?-prefixed form, so plain cursor-positioning CSI (ESC[r;cH) is
+   NEVER carried/split — the corruption a broad CSI carry caused. */
+const PARTIAL_PRIVATE_RE = /\x1b(?:\[(?:\?[\d;]*)?)?$/
 
-/** Drop claude's mouse-tracking modes from a chunk, preserving any non-mouse
-    private modes batched into the same sequence. */
-function stripMouseTracking(s: string): string {
+/** Drop alt-screen + mouse modes from a chunk, preserving any other private mode
+    batched into the same sequence. */
+function stripModes(s: string): string {
   return s.replace(PRIVATE_MODE_SET_RE, (_full, params: string, hl: string) => {
-    const kept = params.split(';').filter((p) => p !== '' && !MOUSE_PRIVATE_MODES.has(Number(p)))
+    const kept = params.split(';').filter((p) => p !== '' && !STRIP_MODES.has(Number(p)))
     return kept.length > 0 ? `\x1b[?${kept.join(';')}${hl}` : ''
   })
-}
-
-/* the button/drag/any-motion tracking modes (the ones that decide whether the app
-   captures the mouse). Encodings (1006/1015) don't change "does the app want
-   mouse", so they're excluded from intent detection. */
-const MOUSE_TRACK_MODES = new Set([1000, 1002, 1003])
-/** The app's LATEST mouse-tracking intent in a chunk ('enable' on ?1003h etc,
-    'disable' on ?1003l), or null if it didn't toggle. Drives wheel forwarding:
-    we strip the enable from xterm (so drag-select works) but the app on the pty
-    still wants mouse, so a wheel must be sent to it as a mouse report to scroll. */
-function detectMouseIntent(s: string): 'enable' | 'disable' | null {
-  let intent: 'enable' | 'disable' | null = null
-  for (const m of s.matchAll(/\x1b\[\?([\d;]+)([hl])/g)) {
-    if (m[1].split(';').some((p) => MOUSE_TRACK_MODES.has(Number(p)))) {
-      intent = m[2] === 'h' ? 'enable' : 'disable'
-    }
-  }
-  return intent
 }
 
 function readToken(name: string, fallback: string): string {
@@ -143,9 +129,9 @@ export function TerminalPanel({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
-  /* set by the lifecycle effect — refit the grid to the container and tell the
-     pty the new size. Called by the ResizeObserver AND an external resizeSignal
-     bump (the latter for layout changes the observer's debounce can miss). */
+  /* set by the lifecycle effect — refit the grid to the container (xterm's
+     onResize then tells the pty). Called by the ResizeObserver AND an external
+     resizeSignal bump (the latter for layout changes the observer can miss). */
   const refitRef = useRef<(() => void) | null>(null)
   const [status, setStatus] = useState<TerminalStatus>('connecting')
   /* status mirrored to a ref so the reconnect-all effect can read it without
@@ -228,20 +214,15 @@ export function TerminalPanel({
   }, [reconnectAllSignal])
   /* refit when the pane's layout changed size (window-count / single↔multi /
      canvas split). The ResizeObserver usually catches this, but a fast reflow
-     can settle inside its debounce and leave the grid at the old size — so refit
-     explicitly, twice, to catch the immediate change AND the post-scrollbar
-     settle. Idempotent when nothing actually changed; NO `active` gate — a refit
-     tears nothing down, and every mounted panel resized when the layout did. */
+     can settle inside its debounce — so refit explicitly once it's settled. A
+     refit only re-fits the grid (xterm's onResize tells the pty); NO `active`
+     gate — every mounted panel resized when the layout did. */
   const lastResizeRef = useRef(resizeSignal)
   useEffect(() => {
     if (resizeSignal === lastResizeRef.current) return
     lastResizeRef.current = resizeSignal
-    const t1 = window.setTimeout(() => refitRef.current?.(), 80)
-    const t2 = window.setTimeout(() => refitRef.current?.(), 300)
-    return () => {
-      window.clearTimeout(t1)
-      window.clearTimeout(t2)
-    }
+    const t = window.setTimeout(() => refitRef.current?.(), 100)
+    return () => window.clearTimeout(t)
   }, [resizeSignal])
   /* the id this connection actually resumed, for the header strip */
   const [boundSessionId, setBoundSessionId] = useState<string | null>(sessionId)
@@ -264,102 +245,95 @@ export function TerminalPanel({
       fontSize: 14,
       fontFamily:
         '"Cascadia Mono", "Cascadia Code", Consolas, "JetBrains Mono", Menlo, Monaco, "Courier New", monospace',
-      allowProposedApi: true,
-      convertEol: true,
       scrollback: 10000,
-      tabStopWidth: 4,
+      /* NO convertEol (would add \r before every \n → column resets in claude's
+         TUI) and NO tabStopWidth override (claude assumes the standard 8) — both
+         desync claude's cursor math from xterm's grid. Manager 26's config. */
       theme: readTerminalTheme(),
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(container)
     termRef.current = term
+    /* xterm initializes its renderer asynchronously after open(); fitting before
+       it is ready throws inside xterm's syncScrollArea (it reads renderer
+       dimensions). So gate EVERY fit behind `ready`, flipped on by the first fit
+       in the deferred connect below — by which point the renderer is ready, and
+       term.cols/rows are accurate to seed the connect query. */
+    let ready = false
 
     const sendResize = () => {
       if (ws !== null && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }))
       }
     }
-
-    /* refit the grid to the container, then tell the pty the new dimensions.
-       Shared by the ResizeObserver and the external resizeSignal bump. */
+    /* re-fit the grid to the container. xterm's onResize (below) is what tells
+       the pty, so a fit that changes the size sends exactly one resize. */
     refitRef.current = () => {
-      if (disposed) return
+      if (disposed || !ready) return
       try {
         fit.fit()
       } catch {
         /* container may be mid-layout */
       }
-      sendResize()
     }
+    /* whenever the grid dimensions actually change, tell the pty — claude gets a
+       SIGWINCH and repaints at the new width. (No proposeDimensions/blank/pty-
+       first dance: in the normal buffer the reflow is xterm-native and clean.) */
+    const resizeSub = term.onResize(() => sendResize())
 
-    /* per-connection partial-sequence carry for the mouse-tracking strip. ConPTY
-       can split a CSI across two WS frames, so a trailing incomplete CSI is held
-       and prepended to the next chunk before stripping; an orphaned carry is
-       flushed after 50ms so a lone ESC is never swallowed. Reset per effect run
-       (one terminal instance == one socket). */
-    let mouseCarry = ''
-    let mouseFlushTimer: number | undefined
-    /* whether the running app (claude's TUI) has mouse tracking ON. We strip the
-       enable so xterm does local drag-select, but track the intent here so the
-       wheel handler can forward scroll to the app (its history has no xterm
-       scrollback to fall back on while it owns the alt-screen). */
-    let appWantsMouse = false
-    const writeSanitized = (data: string) => {
-      window.clearTimeout(mouseFlushTimer)
-      const raw = mouseCarry + data
-      const intent = detectMouseIntent(raw)
-      if (intent !== null) appWantsMouse = intent === 'enable'
-      let text = stripMouseTracking(raw)
-      mouseCarry = ''
-      const from = Math.max(0, text.length - CSI_TAIL_WINDOW)
-      const tail = text.slice(from).match(CSI_TAIL_RE)
-      if (tail !== null && tail[0] !== '') {
-        mouseCarry = tail[0]
-        text = text.slice(0, text.length - tail[0].length)
-        mouseFlushTimer = window.setTimeout(() => {
-          if (mouseCarry !== '') {
-            term.write(mouseCarry)
-            mouseCarry = ''
+    /* Mouse-wheel pages claude's history: send PageUp/PageDown to the pty instead
+       of xterm's default alt-screen wheel→arrow-keys. Throttled so a trackpad
+       flick doesn't fly through pages. Always returns false → xterm never sends
+       its own arrows. */
+    let lastWheelAt = 0
+    term.attachCustomWheelEventHandler((e) => {
+      if (ws === null || ws.readyState !== WebSocket.OPEN) return false
+      const now = e.timeStamp
+      if (now - lastWheelAt < 100) return false
+      lastWheelAt = now
+      const key = e.deltaY < 0 ? '\x1b[5~' : '\x1b[6~' // PageUp : PageDown
+      ws.send(JSON.stringify({ type: 'input', data: key }))
+      return false
+    })
+
+    /* Strip claude's mouse modes (so a drag selects text for Copy), holding back
+       only a partial PRIVATE-mode set across WS frames (50ms flush). Cursor
+       positioning and all other output are written as-is — the narrow carry
+       never splits it (the broad carry that did was the misalignment cause). */
+    let modeCarry = ''
+    let modeFlushTimer: number | undefined
+    const writeOutput = (data: string) => {
+      window.clearTimeout(modeFlushTimer)
+      let text = stripModes(modeCarry + data)
+      modeCarry = ''
+      const partial = text.match(PARTIAL_PRIVATE_RE)
+      if (partial !== null) {
+        modeCarry = partial[0]
+        text = text.slice(0, text.length - partial[0].length)
+        modeFlushTimer = window.setTimeout(() => {
+          if (modeCarry !== '') {
+            term.write(modeCarry)
+            modeCarry = ''
           }
         }, 50)
       }
       if (text !== '') term.write(text)
     }
 
-    /* Wheel scroll. Because we strip mouse tracking from xterm (so drag-select
-       works), the wheel no longer reaches claude — and while claude owns the
-       alt-screen xterm has no scrollback to scroll either, so the terminal felt
-       "stuck". When the app wants mouse, translate the wheel into the SGR
-       mouse-wheel reports it expects (button 64 up / 65 down) so its own history
-       scrolls; otherwise let xterm scroll its scrollback normally. */
-    term.attachCustomWheelEventHandler((e) => {
-      if (!appWantsMouse) return true
-      if (ws === null || ws.readyState !== WebSocket.OPEN) return true
-      const button = e.deltaY < 0 ? 64 : 65
-      let col = 1
-      let row = 1
-      const el = term.element
-      if (el !== undefined) {
-        const r = el.getBoundingClientRect()
-        if (r.width > 0 && r.height > 0) {
-          col = Math.min(term.cols, Math.max(1, Math.floor(((e.clientX - r.left) / r.width) * term.cols) + 1))
-          row = Math.min(term.rows, Math.max(1, Math.floor(((e.clientY - r.top) / r.height) * term.rows) + 1))
-        }
-      }
-      /* a notch is ~100px; send a few wheel reports per notch for a natural pace */
-      const ticks = Math.min(5, Math.max(1, Math.round(Math.abs(e.deltaY) / 40)))
-      let seq = ''
-      for (let i = 0; i < ticks; i++) seq += `\x1b[<${button};${col};${row}M`
-      ws.send(JSON.stringify({ type: 'input', data: seq }))
-      return false
-    })
-
-    /* the connect is deferred a tick so StrictMode's probe mount never
-       opens a socket (which would spawn-and-kill a stray server pty,
-       minting a junk session JSONL when sessionId=new) */
+    /* the connect is deferred so (a) StrictMode's probe mount never opens a socket
+       (which would spawn-and-kill a stray server pty, minting a junk session JSONL
+       when sessionId=new), and (b) xterm's renderer is initialized — so the first
+       fit here is safe (no syncScrollArea throw) and term.cols/rows are accurate
+       to seed the connect query. */
     const connectTimer = window.setTimeout(() => {
       if (disposed) return
+      try {
+        fit.fit()
+      } catch {
+        /* container may be mid-layout */
+      }
+      ready = true
       const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
       /* consume the one-shot force flag: this reconnect re-resumes from scratch */
       const force = forceRestartRef.current
@@ -377,7 +351,7 @@ export function TerminalPanel({
       if (connectSid !== sid) setBoundSessionId(connectSid)
       const query = `projectId=${encodeURIComponent(project.id)}&sessionId=${encodeURIComponent(
         connectSid ?? 'new',
-      )}${force ? '&forceRestart=1' : ''}`
+      )}&cols=${term.cols}&rows=${term.rows}${force ? '&forceRestart=1' : ''}`
       const socket = new WebSocket(`${protocol}://${window.location.host}/ws/terminal?${query}`)
       ws = socket
       wsRef.current = socket
@@ -385,16 +359,15 @@ export function TerminalPanel({
       socket.onopen = () => {
         if (disposed) return
         setStatus('connected')
-        window.setTimeout(() => {
-          if (disposed) return
-          try {
-            fit.fit()
-          } catch {
-            /* container may be mid-layout */
-          }
-          sendResize()
-          term.focus()
-        }, TERMINAL_INIT_DELAY_MS)
+        /* the connect query already sized the pty; one settled fit + resize here
+           guarantees the grid and the pty agree before the first output wraps. */
+        try {
+          fit.fit()
+        } catch {
+          /* container may be mid-layout */
+        }
+        sendResize()
+        term.focus()
       }
 
       socket.onmessage = (e: MessageEvent) => {
@@ -408,7 +381,7 @@ export function TerminalPanel({
         if (msg === null || typeof msg !== 'object') return
         const parsed = msg as { type?: string; data?: unknown; code?: unknown }
         if (parsed.type === 'output' && typeof parsed.data === 'string') {
-          writeSanitized(parsed.data)
+          writeOutput(parsed.data)
         } else if (parsed.type === 'exit') {
           setStatus('exited')
           setExitCode(typeof parsed.code === 'number' ? parsed.code : null)
@@ -419,7 +392,7 @@ export function TerminalPanel({
         if (disposed) return
         setStatus((s) => (s === 'exited' ? s : 'closed'))
       }
-    }, 0)
+    }, TERMINAL_INIT_DELAY_MS)
 
     const dataSub = term.onData((data) => {
       if (ws !== null && ws.readyState === WebSocket.OPEN) {
@@ -428,21 +401,29 @@ export function TerminalPanel({
     })
 
     /* right-click menu — suppress the browser's native menu (its Copy can't see
-       xterm's own selection model) and open our Copy/Cut/Paste menu instead. The
-       selection it copies is now possible because writeSanitized keeps xterm out
-       of mouse-tracking mode; the actions run from render scope (handleCopy etc). */
+       xterm's own selection model) and open our Copy/Cut/Paste menu instead. In
+       the normal buffer a plain drag forms a text selection, so getSelection()
+       has something to copy. The actions run from render scope (handleCopy etc). */
     const handleContextMenu = (e: MouseEvent) => {
       e.preventDefault()
       setCtxMenu({ x: e.clientX, y: e.clientY, hasSelection: term.hasSelection() })
     }
     container.addEventListener('contextmenu', handleContextMenu)
 
+    /* re-fit on a real container size change. A 5px threshold ignores sub-cell
+       jitter, and a 100ms debounce coalesces a drag's many frames into one fit
+       at rest (Manager 26) — no mid-drag garble, no proposeDimensions machinery. */
+    let lastW = container.clientWidth
+    let lastH = container.clientHeight
     let resizeTimer: number | undefined
     const observer = new ResizeObserver(() => {
+      const w = container.clientWidth
+      const h = container.clientHeight
+      if (Math.abs(w - lastW) < 5 && Math.abs(h - lastH) < 5) return
+      lastW = w
+      lastH = h
       window.clearTimeout(resizeTimer)
-      resizeTimer = window.setTimeout(() => {
-        refitRef.current?.()
-      }, TERMINAL_RESIZE_DELAY_MS)
+      resizeTimer = window.setTimeout(() => refitRef.current?.(), 100)
     })
     observer.observe(container)
 
@@ -451,9 +432,10 @@ export function TerminalPanel({
       refitRef.current = null
       window.clearTimeout(connectTimer)
       window.clearTimeout(resizeTimer)
-      window.clearTimeout(mouseFlushTimer)
+      window.clearTimeout(modeFlushTimer)
       observer.disconnect()
       container.removeEventListener('contextmenu', handleContextMenu)
+      resizeSub.dispose()
       dataSub.dispose()
       if (ws !== null && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
         ws.close()

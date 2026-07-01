@@ -50,7 +50,18 @@ export function createSessionWatchers({ sessionsDirFor, broadcast }) {
       fire(entry)
     })
     watcher.on('error', () => {
-      /* transient fs errors — keep watching */
+      // chokidar can STOP firing after an error (EMFILE, a transient fs fault).
+      // An empty handler silently wedges this project's session refresh until a
+      // full server restart — the "chat UI error, only a restart fixes it" bug.
+      // Tear the dead watcher down and re-attach via the retry path so it self-heals.
+      if (entry.closed) return
+      try {
+        watcher.close().catch(() => {})
+      } catch {
+        /* already gone */
+      }
+      entry.watcher = null
+      scheduleRetry(entry)
     })
     entry.watcher = watcher
   }

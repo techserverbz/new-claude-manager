@@ -26,6 +26,14 @@ const IS_WINDOWS = os.platform() === 'win32'
 const PTY_SESSION_TIMEOUT = 30 * 60 * 1000
 // Bounded output buffer per session (~256KB) — replayed on reconnect, oldest dropped.
 const MAX_BUFFER_BYTES = 256 * 1024
+// Fallback pty grid when the client didn't send a valid size in the connect query.
+const TERMINAL_DEFAULT_COLS = 80
+const TERMINAL_DEFAULT_ROWS = 24
+/** Clamp a client-supplied terminal dimension to the same bounds the resize
+    message enforces (2..1000); null when missing/invalid. */
+function validDim(n) {
+  return Number.isFinite(n) && n >= 2 && n <= 1000 ? Math.floor(n) : null
+}
 
 /**
  * The single source of truth for live ptys. Keyed by `${projectId}::${resumeId}`.
@@ -88,6 +96,11 @@ const ANSI_RE = new RegExp('[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:[a-zA-Z0-9]*(?:
 // OSC sequences (e.g. window titles: ESC ] 0;<any text> BEL|ST) — payload may
 // contain spaces/backslashes, so strip them wholesale before the CSI pass.
 const OSC_RE = new RegExp('\\u001B\\][^\\u0007\\u001B]{0,512}(?:\\u0007|\\u001B\\\\)?', 'g')
+
+// Claude's "trust this folder" gate, matched against ANSI-stripped output so the
+// colourised prompt still hits. Only used to send ONE confirming Enter when the
+// gate actually appears (see the spawn path) — never blindly.
+const TRUST_GATE_RE = /trust the files in this folder|trust this folder|do you trust/i
 
 /** Strip ANSI escapes + normalize the pty stream to readable lines. */
 function bufferToText(buffer) {
@@ -173,6 +186,10 @@ export function killSession(projectId, sessionId) {
     clearTimeout(entry.killTimer)
     entry.killTimer = null
   }
+  if (entry.trustTimer) {
+    clearTimeout(entry.trustTimer)
+    entry.trustTimer = null
+  }
   entry.exited = true
   try {
     entry.pty.kill()
@@ -196,6 +213,10 @@ export function killAllTerminals() {
     if (entry.killTimer) {
       clearTimeout(entry.killTimer)
       entry.killTimer = null
+    }
+    if (entry.trustTimer) {
+      clearTimeout(entry.trustTimer)
+      entry.trustTimer = null
     }
     try {
       entry.pty.kill()
@@ -322,13 +343,18 @@ function attachWs(ws, entry, key) {
  *   re-resume from scratch — so a chat turn's new messages (written by a SEPARATE
  *   claude process) are picked up. Used by the frontend's "refresh shell on view".
  */
-export function handleTerminalConnection(ws, { project, sessionId, forceRestart = false }) {
+export function handleTerminalConnection(ws, { project, sessionId, forceRestart = false, cols, rows }) {
   if (!project) {
     safeSend(ws, { type: 'output', data: '\r\nProject not found.\r\n' })
     safeSend(ws, { type: 'exit', code: 1 })
     ws.close()
     return
   }
+  /* the client's real grid at connect time — used to size the pty BEFORE it (or
+     its replayed buffer) emits a byte, so output never wraps at the wrong column
+     ("t / his is"). null when absent/malformed → fall back to the 80x24 default. */
+  const connCols = validDim(cols)
+  const connRows = validDim(rows)
 
   const isNew = !sessionId || sessionId === 'new'
   const resumeId = isNew ? null : String(sessionId)
@@ -352,6 +378,10 @@ export function handleTerminalConnection(ws, { project, sessionId, forceRestart 
         clearTimeout(stale.killTimer)
         stale.killTimer = null
       }
+      if (stale.trustTimer) {
+        clearTimeout(stale.trustTimer)
+        stale.trustTimer = null
+      }
       stale.exited = true
       ptySessions.delete(key)
       tokenToEntry.delete(stale.token)
@@ -372,6 +402,18 @@ export function handleTerminalConnection(ws, { project, sessionId, forceRestart 
       existing.killTimer = null
     }
     existing.ws = ws
+    // Resync the pty to THIS socket's grid width BEFORE replay + before its next
+    // output. If the new grid differs from the pty's last size, claude gets a
+    // SIGWINCH and repaints its alt-screen at the correct width — so live lines
+    // never wrap at the wrong column. (Already-buffered scrollback keeps its old
+    // wrap until that repaint; that is cosmetic, not the persistent live bug.)
+    if (connCols !== null && connRows !== null) {
+      try {
+        existing.pty.resize(connCols, connRows)
+      } catch {
+        /* resize race / pty gone */
+      }
+    }
     safeSend(ws, { type: 'output', data: '\r\n\x1b[36m[Reconnected to existing session]\x1b[0m\r\n' })
     // Replay buffered output so the new socket sees the live screen state.
     for (const chunk of existing.buffer) {
@@ -392,6 +434,7 @@ export function handleTerminalConnection(ws, { project, sessionId, forceRestart 
     buffer: [],
     bufferBytes: 0,
     killTimer: null,
+    trustTimer: null,
     exited: false,
     projectId: project.id,
     sessionId: resumeId,
@@ -403,8 +446,10 @@ export function handleTerminalConnection(ws, { project, sessionId, forceRestart 
   try {
     term = pty.spawn(shell, shellArgs, {
       name: 'xterm-256color',
-      cols: 80,
-      rows: 24,
+      // spawn at the client's real grid so claude's FIRST output (boot, the trust
+      // gate, the welcome) wraps at the right column instead of the old 80
+      cols: connCols ?? TERMINAL_DEFAULT_COLS,
+      rows: connRows ?? TERMINAL_DEFAULT_ROWS,
       cwd: project.fileDir, // plain string — safe with parentheses in the path
       env: buildEnv(project, token),
     })
@@ -419,22 +464,22 @@ export function handleTerminalConnection(ws, { project, sessionId, forceRestart 
   ptySessions.set(key, entry)
 
   // Auto-confirm Claude's "trust this folder" gate so a fresh chat in ANY
-  // directory starts without asking. The gate's default option is "Yes, I trust
-  // this folder", so an Enter confirms it; we send a few across the boot window
-  // to cover variable startup time. Harmless when there's no gate — an empty
-  // Enter at the Claude prompt is a no-op. Skipped if the pty already exited.
-  for (const ms of [1200, 2500, 4000, 6000, 9000]) {
-    const t = setTimeout(() => {
-      if (!entry.exited && entry.pty) {
-        try {
-          entry.pty.write('\r')
-        } catch {
-          /* pty gone */
-        }
-      }
-    }, ms)
-    if (typeof t.unref === 'function') t.unref()
-  }
+  // directory starts without asking — but ONLY when the gate actually shows up.
+  // The old code fired five blind Enters across the boot window; the later ones
+  // landed AFTER claude reached its prompt and injected a stray newline (worst on
+  // reload, where a fresh spawn's overdue timers fired into the just-attached
+  // pty). Instead we WATCH the pty output for the gate text and send exactly one
+  // Enter the instant it appears, then disarm. When no gate ever appears (a
+  // folder claude already trusts — the common case) we send NOTHING, so there is
+  // never a stray Enter. A disarm timer just stops watching after the boot window
+  // so the phrase showing up in normal output later can't trigger a late Enter.
+  let trustArmed = true
+  let trustScan = ''
+  entry.trustTimer = setTimeout(() => {
+    trustArmed = false
+    entry.trustTimer = null
+  }, 15000)
+  if (typeof entry.trustTimer.unref === 'function') entry.trustTimer.unref()
 
   term.onData((data) => {
     // Buffer (bounded ~256KB, drop oldest) so a reconnect can replay the screen.
@@ -444,6 +489,28 @@ export function handleTerminalConnection(ws, { project, sessionId, forceRestart 
       entry.bufferBytes -= entry.buffer.shift().length
     }
     if (entry.ws) safeSend(entry.ws, { type: 'output', data })
+
+    // Trust gate: confirm with a SINGLE Enter the moment the prompt appears, then
+    // disarm so nothing else is ever injected. Scan an ANSI-stripped rolling tail
+    // so the colourised prompt still matches.
+    if (trustArmed) {
+      trustScan = (trustScan + String(data).replace(OSC_RE, '').replace(ANSI_RE, '')).slice(-2048)
+      if (TRUST_GATE_RE.test(trustScan)) {
+        trustArmed = false
+        if (entry.trustTimer) {
+          clearTimeout(entry.trustTimer)
+          entry.trustTimer = null
+        }
+        trustScan = ''
+        if (!entry.exited && entry.pty) {
+          try {
+            entry.pty.write('\r')
+          } catch {
+            /* pty gone */
+          }
+        }
+      }
+    }
   })
 
   term.onExit(({ exitCode }) => {
@@ -451,6 +518,10 @@ export function handleTerminalConnection(ws, { project, sessionId, forceRestart 
     if (entry.killTimer) {
       clearTimeout(entry.killTimer)
       entry.killTimer = null
+    }
+    if (entry.trustTimer) {
+      clearTimeout(entry.trustTimer)
+      entry.trustTimer = null
     }
     // Only unregister if the map still points at THIS entry — a forceRestart may
     // have already replaced it under the same key (whose pty we just killed).

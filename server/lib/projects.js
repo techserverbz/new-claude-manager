@@ -415,12 +415,19 @@ function hasTornFinalLine(text) {
     mid-write. If the last line is partial, wait a beat and re-read once so the
     count doesn't oscillate N↔N-1 between polls. */
 async function readSessionTextStable(filePath) {
-  let text = await fsp.readFile(filePath, 'utf8')
-  if (hasTornFinalLine(text)) {
-    await new Promise((r) => setTimeout(r, 40))
-    text = await fsp.readFile(filePath, 'utf8')
+  const text = await fsp.readFile(filePath, 'utf8')
+  if (!hasTornFinalLine(text)) return text
+  // Re-read ONCE after a beat to let an in-flight append settle. If the second
+  // read also tears (file rewritten rapidly) or fails, keep the FIRST read rather
+  // than retry-looping — parseLines drops the partial line, so a stable N-1 is
+  // fine and never hangs the caller (a hang here would wedge the chat history).
+  await new Promise((r) => setTimeout(r, 40))
+  try {
+    const retry = await fsp.readFile(filePath, 'utf8')
+    return hasTornFinalLine(retry) ? text : retry
+  } catch {
+    return text
   }
-  return text
 }
 
 const ANSI_RE = new RegExp("[\\u001B\\u009B][[\\]()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]", 'g')
