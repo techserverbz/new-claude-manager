@@ -781,6 +781,12 @@ export default function App() {
               : t,
           ),
         )
+        /* pull the just-created session into the catalog so its tab shows the real
+           summary instead of the "Session <id>" fallback — don't wait on a
+           possibly-missed/raced sessions-updated push. Two beats cover a slow
+           JSONL flush; refreshProjects is idempotent + deduped. */
+        window.setTimeout(() => void refreshProjects(), 500)
+        window.setTimeout(() => void refreshProjects(), 2000)
       } else if (ev.type === 'done') {
         /* a chat turn finished — its shell (if open) is now stale and must
            re-resume to show the new messages */

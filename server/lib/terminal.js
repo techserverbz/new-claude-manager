@@ -22,8 +22,11 @@ const TERMINAL_SESSION_ID_RE = /^[a-zA-Z0-9_.\-:]+$/
 
 const IS_WINDOWS = os.platform() === 'win32'
 
-// Keep the pty alive this long after the last ws disconnects (claudecodeui parity).
-const PTY_SESSION_TIMEOUT = 30 * 60 * 1000
+// Keep the pty alive this long after the last ws disconnects. Long, lenient window
+// so a network blip / laptop sleep / wifi hop never reaps the session out from
+// under a reconnect. Local single-user app, so a lingering idle pty costs ~256KB
+// buffer + one process — cheap.
+const PTY_SESSION_TIMEOUT = 4 * 60 * 60 * 1000 // 4 hours (was 30 min)
 // Bounded output buffer per session (~256KB) — replayed on reconnect, oldest dropped.
 const MAX_BUFFER_BYTES = 256 * 1024
 // Fallback pty grid when the client didn't send a valid size in the connect query.

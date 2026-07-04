@@ -1127,6 +1127,25 @@ const server = createServer(app)
 const chatWss = new WebSocketServer({ noServer: true })
 const terminalWss = new WebSocketServer({ noServer: true })
 
+// Keep terminal sockets alive with a periodic WebSocket ping. An idle socket is
+// otherwise dropped by the browser/OS/firewall after ~30-60s of silence, which is
+// what surfaces the "Link dropped" / Reconnect button. ping() sends a control frame
+// the browser auto-answers with pong; nothing reaches the pty or the app-level
+// message handlers, so the terminal stream is undisturbed.
+const terminalPingInterval = setInterval(() => {
+  for (const ws of terminalWss.clients) {
+    if (ws.readyState === ws.OPEN) {
+      try {
+        ws.ping()
+      } catch {
+        /* socket already closing — its close handler does the cleanup */
+      }
+    }
+  }
+}, 25 * 1000)
+// never let the heartbeat keep the process alive on its own
+if (typeof terminalPingInterval.unref === 'function') terminalPingInterval.unref()
+
 server.on('upgrade', (req, socket, head) => {
   let url
   try {
@@ -1370,6 +1389,7 @@ let shuttingDown = false
 function shutdown() {
   if (shuttingDown) return
   shuttingDown = true
+  clearInterval(terminalPingInterval)
   watchers.closeAll()
   for (const turn of activeTurns) {
     try {

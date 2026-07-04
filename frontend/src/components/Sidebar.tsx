@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import type { Variants } from 'framer-motion'
@@ -650,6 +650,7 @@ export function Sidebar({
   const [editing, setEditing] = useState<MenuTarget | null>(null)
   const [editValue, setEditValue] = useState('')
   const editInputRef = useRef<HTMLInputElement>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
 
   const openMenu = (e: ReactMouseEvent, target: MenuTarget) => {
     e.preventDefault()
@@ -713,6 +714,21 @@ export function Sidebar({
       window.removeEventListener('keydown', onKey)
       window.removeEventListener('resize', close)
     }
+  }, [menu])
+
+  /* keep the context menu inside the viewport — a right-click near the bottom or
+     right edge would otherwise run this menu off-page. Runs in a layout effect
+     (before paint) so the first frame is already corrected — no visible jump.
+     Mirrors the clamp in CanvasFilesPanel/TerminalPanel. */
+  useLayoutEffect(() => {
+    const el = menuRef.current
+    if (menu === null || el === null) return
+    const rect = el.getBoundingClientRect()
+    const pad = 8
+    const x = Math.max(pad, Math.min(menu.x, window.innerWidth - rect.width - pad))
+    const y = Math.max(pad, Math.min(menu.y, window.innerHeight - rect.height - pad))
+    el.style.left = `${x}px`
+    el.style.top = `${y}px`
   }, [menu])
 
   /* a compact inline rename field shown in place of a row's title */
@@ -2116,6 +2132,7 @@ export function Sidebar({
       {/* — right-click context menu (rename / copy id / terminate) — */}
       {menu !== null && (
         <div
+          ref={menuRef}
           role="menu"
           className="fixed z-50 min-w-[12rem] border border-hairline bg-surface py-1 shadow-lg shadow-black/40"
           style={{ left: menu.x, top: menu.y }}
