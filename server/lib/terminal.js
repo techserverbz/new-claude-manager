@@ -359,7 +359,9 @@ export function handleTerminalConnection(ws, { project, sessionId, forceRestart 
   const connCols = validDim(cols)
   const connRows = validDim(rows)
 
-  const isNew = !sessionId || sessionId === 'new'
+  // 'new' or 'new:<n>' (a per-pane unique key so multiple new-chat tabs each get
+  // their OWN pty instead of colliding on a single 'new' entry) => a fresh spawn.
+  const isNew = !sessionId || sessionId === 'new' || String(sessionId).startsWith('new:')
   const resumeId = isNew ? null : String(sessionId)
   if (resumeId && !TERMINAL_SESSION_ID_RE.test(resumeId)) {
     safeSend(ws, { type: 'output', data: '\r\nInvalid session id.\r\n' })
@@ -368,8 +370,10 @@ export function handleTerminalConnection(ws, { project, sessionId, forceRestart 
     return
   }
 
-  // Stable key: same project + same resume target => same live pty.
-  const key = `${project.id}::${resumeId ?? 'new'}`
+  // Stable key: same project + same resume target => same live pty. For a new
+  // session the key uses the client's unique 'new:<n>' (not a shared 'new') so
+  // each new-chat pane owns a distinct pty.
+  const key = `${project.id}::${resumeId ?? (sessionId || 'new')}`
 
   // FORCE RESTART: drop any persisted pty for this key so we re-resume below and
   // pick up messages a chat turn appended to the session JSONL. (The old pty's

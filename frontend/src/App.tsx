@@ -31,10 +31,10 @@ export interface WorkTab {
   empty?: boolean
 }
 
-/* light cream paper is the default, matching 1Cal's landing at / */
+/* Locked to light mode (light cream paper), matching 1Cal's landing at /.
+   Dark mode is intentionally disabled — always return 'light'. */
 function initialTheme(): Theme {
-  const saved = localStorage.getItem('cos-theme')
-  return saved === 'dark' ? 'dark' : 'light'
+  return 'light'
 }
 
 /** which view selecting a session lands on — chat unless the user prefers the
@@ -788,6 +788,11 @@ export default function App() {
         window.setTimeout(() => void refreshProjects(), 500)
         window.setTimeout(() => void refreshProjects(), 2000)
       } else if (ev.type === 'done') {
+        /* a chat turn finished — the session's JSONL is now written/flushed, so
+           refetch the catalog to resolve its real name (the earlier
+           session-created refetch can fire before the file lands, leaving the tab
+           on the "Session <id>" fallback until a manual reload). */
+        void refreshProjects()
         /* a chat turn finished — its shell (if open) is now stale and must
            re-resume to show the new messages */
         if (ev.sessionId) {
@@ -985,8 +990,12 @@ export default function App() {
     pendingGroupAddRef.current = null
     void api
       .addChatToGroup(groupId, minted.id, cwd)
-      .then((group) => setGroups((g) => g.map((x) => (x.id === group.id ? group : x))))
-      .catch(() => {})
+      .then((group) => {
+        setGroups((g) => g.map((x) => (x.id === group.id ? group : x)))
+      })
+      .catch((err) => {
+        console.error('[claude-manager] fallback addChatToGroup failed:', err)
+      })
     setOpenTabs((prev) =>
       prev.map((t) =>
         t.key === tabKey && isReal(t) && t.sessionId === null
@@ -1274,11 +1283,15 @@ export default function App() {
        membership. Done in the body (not the updater) so the updater stays pure. */
     const pending = pendingGroupAddRef.current
     if (pending !== null && pending.tabKey === key) {
-      pendingGroupAddRef.current = null
       void api
         .addChatToGroup(pending.groupId, sid, pending.cwd)
-        .then((group) => setGroups((g) => g.map((x) => (x.id === group.id ? group : x))))
-        .catch(() => {})
+        .then((group) => {
+          pendingGroupAddRef.current = null
+          setGroups((g) => g.map((x) => (x.id === group.id ? group : x)))
+        })
+        .catch((err) => {
+          console.error('[claude-manager] addChatToGroup failed:', err)
+        })
     }
     setOpenTabs((prev) =>
       prev.map((t) => {

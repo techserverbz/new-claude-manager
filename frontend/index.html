@@ -6,10 +6,9 @@
     <meta name="theme-color" content="#F4ECDA" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <script>
-      /* apply saved theme before first paint to avoid a flash */
-      if (localStorage.getItem('cos-theme') === 'dark') {
-        document.documentElement.classList.add('dark')
-      }
+      /* light mode only — never apply the dark class, and clear any persisted dark */
+      document.documentElement.classList.remove('dark')
+      try { localStorage.setItem('cos-theme', 'light') } catch {}
     </script>
     <title>Christopher OS</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />

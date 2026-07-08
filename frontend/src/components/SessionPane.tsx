@@ -31,8 +31,9 @@ import type { TerminalStatus } from './TerminalPanel'
  * server-side pty + running claude CLI) and drop a mid-turn chat stream.
  */
 
-/** the session key for a 'new' (not-yet-created) session in the terminal pool */
-const NEW_SESSION_KEY = 'new'
+/** counter for generating unique 'new' session keys per pane instance, so that
+    multiple new-chat tabs don't collide on the same server-side pty */
+let newSessionSeq = 0
 
 /** a pane shows just its session's chat and shell — nothing else */
 type PaneView = 'chat' | 'terminals'
@@ -93,6 +94,11 @@ export function SessionPane({
   /** close this window (drop its tab) */
   onClose?: () => void
 }) {
+  /* stable unique key for THIS pane's 'new' (not-yet-minted) session — each pane
+     gets its own so multiple new-chat tabs don't share one server-side pty */
+  const newSessionKeyRef = useRef(`new:${newSessionSeq++}`)
+  const NEW_SESSION_KEY = newSessionKeyRef.current
+
   /* this pane's sub-view — seeded from an explicit view request when the pane
      opens to one (right-click → "Chat view"), else the default-view preference */
   const [view, setView] = useState<PaneView>(() =>
@@ -205,7 +211,7 @@ export function SessionPane({
   const lastActiveSessionsRef = useRef<string>('')
   useEffect(() => {
     const ids = openedTerminals.filter(
-      (sk) => sk !== NEW_SESSION_KEY && terminalStatus[sk] === 'connected',
+      (sk) => !sk.startsWith('new:') && terminalStatus[sk] === 'connected',
     )
     const signature = [...ids].sort().join(',')
     if (signature === lastActiveSessionsRef.current) return
@@ -356,7 +362,7 @@ export function SessionPane({
             >
               <TerminalPanel
                 project={project}
-                sessionId={sk === NEW_SESSION_KEY ? null : sk}
+                sessionId={sk}
                 theme={theme}
                 hideHeader
                 /* pass the STABLE counters to every panel; the panel gates the

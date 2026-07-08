@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { mulberry32 } from '../lib/prng'
 import type { Theme } from '../App'
@@ -53,6 +53,7 @@ export function CelestialSphere({ size = 280, theme = 'light', className }: Cele
   const themeRef = useRef<Theme>(theme)
   themeRef.current = theme
   const recolorRef = useRef<((t: Theme) => void) | null>(null)
+  const [webglFailed, setWebglFailed] = useState(false)
 
   useEffect(() => {
     recolorRef.current?.(theme)
@@ -62,7 +63,16 @@ export function CelestialSphere({ size = 280, theme = 'light', className }: Cele
     const mount = mountRef.current
     if (!mount) return
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
+    /* WebGL is unavailable on some machines (no GPU / disabled / headless) — a
+       thrown WebGLRenderer would crash the whole React tree (white screen on the
+       new-chat/empty screen where this renders). Fall back to a static SVG. */
+    let renderer: THREE.WebGLRenderer
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
+    } catch {
+      setWebglFailed(true)
+      return
+    }
     renderer.setPixelRatio(Math.max(1, window.devicePixelRatio || 1))
     renderer.setSize(size, size)
     mount.appendChild(renderer.domElement)
@@ -188,6 +198,22 @@ export function CelestialSphere({ size = 280, theme = 'light', className }: Cele
       mount.removeChild(renderer.domElement)
     }
   }, [size])
+
+  if (webglFailed) {
+    return (
+      <div
+        aria-hidden="true"
+        className={className}
+        style={{ width: size, height: size, display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.3 }}
+      >
+        <svg width={size * 0.5} height={size * 0.5} viewBox="0 0 100 100" fill="none" stroke="currentColor" strokeWidth="0.5">
+          <circle cx="50" cy="50" r="40" />
+          <ellipse cx="50" cy="50" rx="40" ry="16" />
+          <ellipse cx="50" cy="50" rx="16" ry="40" />
+        </svg>
+      </div>
+    )
+  }
 
   return (
     <div
