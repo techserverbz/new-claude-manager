@@ -3,12 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#F4ECDA" />
+    <meta name="theme-color" content="#0a0a0a" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <script>
-      /* light mode only — never apply the dark class, and clear any persisted dark */
-      document.documentElement.classList.remove('dark')
-      try { localStorage.setItem('cos-theme', 'light') } catch {}
+      /* Dark mode is the default. Applied before first paint to avoid a flash.
+         The theme still persists: the toggle writes localStorage and we honor it
+         here. A one-time migration ('cos-theme-init') flips anyone the old
+         light-lock had pinned to 'light' over to dark once. */
+      try {
+        if (localStorage.getItem('cos-theme-init') !== '1') {
+          localStorage.setItem('cos-theme', 'dark')
+          localStorage.setItem('cos-theme-init', '1')
+        }
+        var t = localStorage.getItem('cos-theme')
+        if (t !== 'dark' && t !== 'light') { t = 'dark'; localStorage.setItem('cos-theme', t) }
+        document.documentElement.classList.toggle('dark', t === 'dark')
+      } catch (e) {
+        document.documentElement.classList.add('dark')
+      }
     </script>
     <title>Christopher OS</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />

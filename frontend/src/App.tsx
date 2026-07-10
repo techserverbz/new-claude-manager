@@ -31,10 +31,15 @@ export interface WorkTab {
   empty?: boolean
 }
 
-/* Locked to light mode (light cream paper), matching 1Cal's landing at /.
-   Dark mode is intentionally disabled — always return 'light'. */
+/* Dark mode is the default; a stored preference (set by the theme toggle) wins.
+   The index.html bootstrap already applied the .dark class before paint and
+   migrated any old forced-'light' value, so this just mirrors that choice. */
 function initialTheme(): Theme {
-  return 'light'
+  try {
+    return localStorage.getItem('cos-theme') === 'light' ? 'light' : 'dark'
+  } catch {
+    return 'dark'
+  }
 }
 
 /** which view selecting a session lands on — chat unless the user prefers the
