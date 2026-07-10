@@ -10,14 +10,22 @@ import cors from 'cors'
 import fs from 'fs'
 import path from 'path'
 import http from 'http'
+import { fileURLToPath } from 'node:url'
 import { WebSocketServer, WebSocket } from 'ws'
 
 const PORT = Number(process.env.PORT || process.env.API_PORT || 4000)
-let CANVAS_DIR = process.env.CANVAS_DIR || './canvas-data'
 
-if (!CANVAS_DIR || CANVAS_DIR === './canvas-data') {
-  console.warn('[warn] CANVAS_DIR not set — using ./canvas-data. Run setup.sh to configure.')
-}
+// Canvas files live INSIDE this app folder by default, so a fresh clone just
+// works — no setup.sh, no folder to pick. The default is resolved from THIS
+// file's own location (not the process CWD), so it is the same folder no matter
+// where the server is launched from. An explicit CANVAS_DIR (env or .env) still
+// wins if you want the files stored elsewhere.
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const DEFAULT_CANVAS_DIR = path.resolve(HERE, '..', 'canvas-data')
+let CANVAS_DIR =
+  process.env.CANVAS_DIR && process.env.CANVAS_DIR.trim()
+    ? process.env.CANVAS_DIR.trim()
+    : DEFAULT_CANVAS_DIR
 
 if (!fs.existsSync(CANVAS_DIR)) fs.mkdirSync(CANVAS_DIR, { recursive: true })
 

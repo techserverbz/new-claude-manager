@@ -23,6 +23,10 @@ out
 # Runtime user data (projects, sessions, memory, views) — not source
 server/data/
 
+# Excalidraw canvas files (the self-contained default store) — not source
+excalidraw-canvas/canvas-data/
+**/canvas-data/
+
 # Logs
 *.log
 npm-debug.log*

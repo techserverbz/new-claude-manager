@@ -3,7 +3,8 @@ title New Claude Manager
 cd /d "%~dp0"
 set "CHROME=C:\Program Files\Google\Chrome\Application\chrome.exe"
 
-if not exist node_modules ( echo First run - installing dependencies... & call npm install )
+if not exist node_modules ( echo First run - installing Christopher dependencies... & call npm install )
+if not exist "excalidraw-canvas\node_modules" ( echo First run - installing Excalidraw canvas dependencies... & pushd excalidraw-canvas & call npm install & popd )
 
 REM --- Close any already-running instance: kill the node processes listening on ---
 REM --- 4040 (server) / 5200 (Vite) so a fresh start never collides on the strict ---
