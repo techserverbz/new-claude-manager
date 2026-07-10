@@ -96,6 +96,7 @@ export function TerminalPanel({
   active = true,
   hideHeader = false,
   onStatusChange,
+  onSessionIdChange,
 }: {
   project: Project
   sessionId: string | null
@@ -126,6 +127,10 @@ export function TerminalPanel({
   /** notified whenever this panel's connection status changes (and 'closed' on
       unmount), so the workspace can light a live marker for running shells */
   onStatusChange?: (status: TerminalStatus) => void
+  /** a fresh 'new' shell just had its REAL session id minted by the server —
+      report it up so the tab migrates from 'new' to /session/<id>, and so a
+      page reload reconnects to this exact pty instead of resuming a new one */
+  onSessionIdChange?: (sessionId: string) => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
@@ -169,6 +174,10 @@ export function TerminalPanel({
      bumps the prop) would resume a fresh pty under the real id, orphaning the
      live 'new' pty and spawning a duplicate claude. undefined until first connect. */
   const connectedSidRef = useRef<string | null | undefined>(undefined)
+  /* read the migration callback through a ref so the socket handler (created once
+     per connect) always calls the latest without re-running the effect */
+  const onSessionIdChangeRef = useRef(onSessionIdChange)
+  onSessionIdChangeRef.current = onSessionIdChange
   const lastRefreshRef = useRef(refreshSignal)
   const activeRef = useRef(active)
   activeRef.current = active
@@ -379,12 +388,21 @@ export function TerminalPanel({
           return
         }
         if (msg === null || typeof msg !== 'object') return
-        const parsed = msg as { type?: string; data?: unknown; code?: unknown }
+        const parsed = msg as { type?: string; data?: unknown; code?: unknown; sessionId?: unknown }
         if (parsed.type === 'output' && typeof parsed.data === 'string') {
           writeOutput(parsed.data)
         } else if (parsed.type === 'exit') {
           setStatus('exited')
           setExitCode(typeof parsed.code === 'number' ? parsed.code : null)
+        } else if (parsed.type === 'session' && typeof parsed.sessionId === 'string') {
+          /* the server minted this fresh shell's REAL session id. Adopt it as the
+             id this connection is bound to, so every future reconnect (live rejoin
+             AND after a page reload) targets this exact pty instead of a throwaway
+             'new:<n>' key — and tell the app so the tab migrates to /session/<id>. */
+          const realId = parsed.sessionId
+          connectedSidRef.current = realId
+          setBoundSessionId(realId)
+          onSessionIdChangeRef.current?.(realId)
         }
       }
 

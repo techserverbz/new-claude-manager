@@ -375,6 +375,7 @@ export function SessionPane({
                 resizeSignal={resizeSignal}
                 active={isCurrent && isFocused}
                 onStatusChange={(status) => handleStatusChange(sk, status)}
+                onSessionIdChange={onSessionIdChange}
               />
             </section>
           )
