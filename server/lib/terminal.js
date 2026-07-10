@@ -124,7 +124,7 @@ export function listLiveSessions(projectId = null) {
     out.push({
       projectId: entry.projectId,
       sessionId: entry.sessionId, // null = a fresh 'new' session (no id minted yet)
-      attached: entry.ws !== null, // a UI pane is currently viewing it
+      attached: entry.sockets.size > 0, // one or more UI panes are viewing it
       bufferBytes: entry.bufferBytes,
     })
   }
@@ -199,9 +199,9 @@ export function killSession(projectId, sessionId) {
   } catch {
     /* already dead */
   }
-  // tell the attached panel so it flips to "exited" at once
+  // tell every attached panel so they flip to "exited" at once
   try {
-    if (entry.ws) safeSend(entry.ws, { type: 'exit', code: 0 })
+    sendToAll(entry, { type: 'exit', code: 0 })
   } catch {
     /* ws gone */
   }
@@ -277,11 +277,59 @@ function safeSend(ws, frame) {
 }
 
 /**
- * Wire a ws's message/close/error handlers to a (possibly pre-existing) entry.
- * Closing over `entry` (not a local `term`) means a reconnected ws drives the
- * persisted pty. Used by BOTH the fresh-spawn and reconnect paths.
+ * Fan a frame out to EVERY socket viewing this pty. A session can be open in
+ * more than one browser tab at once (both tabs restored the same last-active
+ * session, or the user deliberately opened it twice) — each viewer is a live
+ * socket in entry.sockets and all of them must see the pty's output.
  */
-function attachWs(ws, entry, key) {
+function sendToAll(entry, frame) {
+  for (const sock of entry.sockets) safeSend(sock, frame)
+}
+
+/**
+ * Resize the pty to the SMALLEST grid among its viewers (tmux-style). With one
+ * viewer that is simply its size; with several, the min keeps every viewer's
+ * screen intact — no viewer ever sees output wider than its own grid (which is
+ * exactly what would garble the narrower tab). Each socket carries its last
+ * grid on __cols/__rows (seeded from the connect query, updated by resize
+ * messages); sockets with no known size are ignored.
+ */
+function sizePty(entry) {
+  if (entry.exited || !entry.pty) return
+  let cols = null
+  let rows = null
+  for (const sock of entry.sockets) {
+    if (typeof sock.__cols === 'number' && sock.__cols >= 2) cols = cols === null ? sock.__cols : Math.min(cols, sock.__cols)
+    if (typeof sock.__rows === 'number' && sock.__rows >= 2) rows = rows === null ? sock.__rows : Math.min(rows, sock.__rows)
+  }
+  if (cols === null || rows === null) return
+  try {
+    entry.pty.resize(cols, rows)
+  } catch {
+    /* resize race / pty gone */
+  }
+}
+
+/**
+ * Wire a ws's message/close/error handlers to a (possibly pre-existing) entry
+ * and register it as one of the entry's live viewers. Closing over `entry`
+ * (not a local `term`) means every attached ws drives the persisted pty, and
+ * the pty fans output to ALL of them — so opening a session in a second tab
+ * MIRRORS it rather than stealing the pty from the first tab (which used to
+ * leave the first tab frozen, then dropped it to "Reconnect"). Used by BOTH
+ * the fresh-spawn and reconnect/join paths.
+ */
+function attachWs(ws, entry, key, cols, rows) {
+  ws.__cols = typeof cols === 'number' ? cols : null
+  ws.__rows = typeof rows === 'number' ? rows : null
+  entry.sockets.add(ws)
+  // A viewer is present again — cancel any pending reap from when the last left.
+  if (entry.killTimer) {
+    clearTimeout(entry.killTimer)
+    entry.killTimer = null
+  }
+  sizePty(entry)
+
   ws.on('message', (raw) => {
     let msg
     try {
@@ -299,28 +347,30 @@ function attachWs(ws, entry, key) {
         }
       }
     } else if (msg.type === 'resize') {
-      const cols = Math.floor(Number(msg.cols))
-      const rows = Math.floor(Number(msg.rows))
-      if (Number.isFinite(cols) && Number.isFinite(rows) && cols >= 2 && cols <= 1000 && rows >= 2 && rows <= 1000 && !entry.exited) {
-        try {
-          entry.pty.resize(cols, rows)
-        } catch {
-          /* ignore resize races */
-        }
+      const c = Math.floor(Number(msg.cols))
+      const r = Math.floor(Number(msg.rows))
+      if (Number.isFinite(c) && Number.isFinite(r) && c >= 2 && c <= 1000 && r >= 2 && r <= 1000) {
+        ws.__cols = c
+        ws.__rows = r
+        sizePty(entry) // resize to the min across all viewers, not just this one
       }
     }
   })
 
   ws.on('close', () => {
-    // Do NOT kill on disconnect — keep the pty alive for reconnect.
-    // Only act if this ws is still the attached one (a newer reconnect may have
-    // already replaced entry.ws and cleared/rescheduled the timer).
-    if (entry.ws !== ws) return
-    entry.ws = null
+    // Drop this viewer. Do NOT kill the pty while OTHER tabs still view it.
+    entry.sockets.delete(ws)
+    if (entry.sockets.size > 0) {
+      // a smaller viewer may have just left — the pty can grow back
+      sizePty(entry)
+      return
+    }
+    // Last viewer gone — keep the pty alive for a reconnect, then reap.
+    if (entry.killTimer) clearTimeout(entry.killTimer)
     entry.killTimer = setTimeout(() => {
-      // Guard: only reap if this exact entry is still registered and live, i.e.
-      // no newer reconnect replaced entry.ws (which would have cleared this timer).
-      if (ptySessions.get(key) === entry && !entry.exited) {
+      // Guard: only reap if this exact entry is still registered, live, and
+      // STILL has no viewers (a reconnect since would have cleared this timer).
+      if (ptySessions.get(key) === entry && !entry.exited && entry.sockets.size === 0) {
         try {
           entry.pty.kill()
         } catch {
@@ -400,33 +450,24 @@ export function handleTerminalConnection(ws, { project, sessionId, forceRestart 
     }
   }
 
-  // RECONNECT: an entry exists, has not exited, and its pty is alive. Rejoin it.
+  // RECONNECT / JOIN: an entry exists, has not exited, and its pty is alive.
+  // If a viewer is already attached this is a SECOND tab joining a live session
+  // (mirror it); if none are attached it is a genuine reconnect after the last
+  // tab left. Either way we attach this socket as an ADDITIONAL viewer — we no
+  // longer steal the pty from whoever else is watching.
   const existing = forceRestart ? undefined : ptySessions.get(key)
   if (existing && !existing.exited) {
-    // Cancel any pending reap from the previous disconnect.
-    if (existing.killTimer) {
-      clearTimeout(existing.killTimer)
-      existing.killTimer = null
-    }
-    existing.ws = ws
-    // Resync the pty to THIS socket's grid width BEFORE replay + before its next
-    // output. If the new grid differs from the pty's last size, claude gets a
-    // SIGWINCH and repaints its alt-screen at the correct width — so live lines
-    // never wrap at the wrong column. (Already-buffered scrollback keeps its old
-    // wrap until that repaint; that is cosmetic, not the persistent live bug.)
-    if (connCols !== null && connRows !== null) {
-      try {
-        existing.pty.resize(connCols, connRows)
-      } catch {
-        /* resize race / pty gone */
-      }
-    }
-    safeSend(ws, { type: 'output', data: '\r\n\x1b[36m[Reconnected to existing session]\x1b[0m\r\n' })
+    const joiningLive = existing.sockets.size > 0
+    const banner = joiningLive ? '[Joined shared session]' : '[Reconnected to existing session]'
+    safeSend(ws, { type: 'output', data: `\r\n\x1b[36m${banner}\x1b[0m\r\n` })
     // Replay buffered output so the new socket sees the live screen state.
     for (const chunk of existing.buffer) {
       safeSend(ws, { type: 'output', data: chunk })
     }
-    attachWs(ws, existing, key)
+    // Register as a viewer. attachWs resyncs the pty to the SMALLEST viewer grid
+    // (this socket included) so no viewer sees output wider than its own screen;
+    // when that changes the size claude gets a SIGWINCH and repaints for all.
+    attachWs(ws, existing, key, connCols, connRows)
     return
   }
 
@@ -437,7 +478,7 @@ export function handleTerminalConnection(ws, { project, sessionId, forceRestart 
 
   const entry = {
     pty: null,
-    ws,
+    sockets: new Set(), // every ws currently viewing this pty (attachWs adds/removes)
     buffer: [],
     bufferBytes: 0,
     killTimer: null,
@@ -495,7 +536,7 @@ export function handleTerminalConnection(ws, { project, sessionId, forceRestart 
     while (entry.bufferBytes > MAX_BUFFER_BYTES && entry.buffer.length > 1) {
       entry.bufferBytes -= entry.buffer.shift().length
     }
-    if (entry.ws) safeSend(entry.ws, { type: 'output', data })
+    sendToAll(entry, { type: 'output', data })
 
     // Trust gate: confirm with a SINGLE Enter the moment the prompt appears, then
     // disarm so nothing else is ever injected. Scan an ANSI-stripped rolling tail
@@ -534,8 +575,8 @@ export function handleTerminalConnection(ws, { project, sessionId, forceRestart 
     // have already replaced it under the same key (whose pty we just killed).
     if (ptySessions.get(key) === entry) ptySessions.delete(key)
     tokenToEntry.delete(entry.token)
-    if (entry.ws) safeSend(entry.ws, { type: 'exit', code: typeof exitCode === 'number' ? exitCode : 0 })
+    sendToAll(entry, { type: 'exit', code: typeof exitCode === 'number' ? exitCode : 0 })
   })
 
-  attachWs(ws, entry, key)
+  attachWs(ws, entry, key, connCols, connRows)
 }
