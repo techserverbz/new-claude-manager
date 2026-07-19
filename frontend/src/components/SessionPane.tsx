@@ -342,7 +342,6 @@ export function SessionPane({
               reconnectAllSignal={reconnectAllSignal}
               hideHeader
               onOpenInShell={handleOpenInShell}
-              onSessionIdChange={onSessionIdChange}
             />
           </section>
         )}

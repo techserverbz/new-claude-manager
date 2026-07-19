@@ -59,7 +59,6 @@ import {
   reorderGroups,
 } from './lib/groups.js'
 import { listViews, replaceViews } from './lib/views.js'
-import { startChatTurn } from './lib/claude.js'
 import {
   handleTerminalConnection,
   killAllTerminals,
@@ -1203,78 +1202,27 @@ function broadcast(frame) {
 const watchers = createSessionWatchers({ sessionsDirFor, broadcast })
 watchers.sync(listProjects())
 
-// Every in-flight chat turn, so shutdown can abort them all.
-const activeTurns = new Set()
-
+// The chat WS is now a READ-ONLY event channel. Clients subscribe to receive
+// broadcast frames (chiefly 'sessions-updated', emitted by the session-JSONL
+// watcher) so the message viewer can re-read a session's transcript when the
+// terminal's claude writes to it. It NO LONGER spawns a claude per message.
+//
+// This is the core of the 26-engine port: ONE interactive pty per session (see
+// terminal.js) is the single claude, shared by the terminal view and the
+// read-only message viewer. There is never a second `claude --print --resume`
+// racing the pty on the same session id — which was both a resource multiplier
+// (a heavyweight claude per chat turn, on top of the persistent pty per session)
+// AND a corruption hazard (two processes resuming one session at once). Removing
+// it is what makes the app non-terminating no matter how many windows are open.
 chatWss.on('connection', (ws) => {
   chatClients.add(ws)
-  let activeTurn = null
 
-  ws.on('message', (raw) => {
-    let msg
-    try {
-      msg = JSON.parse(raw.toString())
-    } catch {
-      sendTo(ws, { type: 'error', error: 'Invalid JSON message' })
-      return
-    }
-    if (!msg || typeof msg !== 'object') return
-
-    if (msg.type === 'chat') {
-      if (activeTurn) {
-        sendTo(ws, { type: 'error', error: 'A chat turn is already in progress on this connection' })
-        return
-      }
-      const project = getProject(typeof msg.projectId === 'string' ? msg.projectId : '')
-      if (!project) {
-        sendTo(ws, { type: 'error', error: 'Project not found' })
-        return
-      }
-      const message = typeof msg.message === 'string' ? msg.message : ''
-      if (!message.trim()) {
-        sendTo(ws, { type: 'error', error: 'message is required' })
-        return
-      }
-      let sessionId = null
-      if (msg.sessionId !== null && msg.sessionId !== undefined && msg.sessionId !== '') {
-        sessionId = String(msg.sessionId)
-        if (!SESSION_ID_RE.test(sessionId)) {
-          sendTo(ws, { type: 'error', error: 'Invalid sessionId' })
-          return
-        }
-      }
-      // Assign via a local first so onExit (deferred to a microtask on sync
-      // spawn failures) can never be clobbered by this assignment.
-      const turn = startChatTurn({
-        project,
-        sessionId,
-        message,
-        send: (frame) => sendTo(ws, frame),
-        onExit: () => {
-          activeTurn = null
-          activeTurns.delete(turn)
-          // First turn of a brand-new project creates the session folder —
-          // make sure the watcher attaches, and nudge clients to refresh.
-          watchers.ensure(project)
-          broadcast({ type: 'sessions-updated', projectId: project.id })
-        },
-      })
-      activeTurn = turn
-      activeTurns.add(turn)
-    } else if (msg.type === 'abort') {
-      if (activeTurn) {
-        activeTurn.abort()
-      } else {
-        // Always answer an abort so a client that believes it is mid-turn
-        // (e.g. after a reconnect orphaned the turn) can unstick itself.
-        sendTo(ws, { type: 'error', error: 'No chat turn in progress' })
-      }
-    }
-  })
+  // Parse-and-ignore: no client frame drives the server anymore. Kept as a
+  // no-op so a stray/legacy frame can never crash the socket.
+  ws.on('message', () => {})
 
   ws.on('close', () => {
     chatClients.delete(ws)
-    if (activeTurn) activeTurn.abort()
   })
 
   ws.on('error', () => {
@@ -1391,14 +1339,6 @@ function shutdown() {
   shuttingDown = true
   clearInterval(terminalPingInterval)
   watchers.closeAll()
-  for (const turn of activeTurns) {
-    try {
-      turn.abort()
-    } catch {
-      /* best effort */
-    }
-  }
-  activeTurns.clear()
   killAllTerminals()
   for (const client of chatClients) {
     try {

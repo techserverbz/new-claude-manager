@@ -58,21 +58,17 @@ class ChatSocketManager {
   private reconnectTimer: number | null = null
   private stableTimer: number | null = null
 
-  /** subscribe to server events; returns an unsubscribe function */
+  /** subscribe to server events; returns an unsubscribe function.
+   *  The socket is now READ-ONLY: it exists to receive broadcast frames
+   *  (chiefly 'sessions-updated') so the message viewer re-reads a session's
+   *  transcript when the terminal's claude writes to it. Nothing is sent — the
+   *  single interactive pty per session is the only thing that drives claude. */
   subscribe(listener: ChatSocketListener): () => void {
     this.listeners.add(listener)
     this.ensureConnected()
     return () => {
       this.listeners.delete(listener)
     }
-  }
-
-  sendChat(projectId: string, sessionId: string | null, message: string): void {
-    this.send({ type: 'chat', projectId, sessionId, message })
-  }
-
-  sendAbort(): void {
-    this.send({ type: 'abort' })
   }
 
   /** Force an immediate reconnect: drop the current socket and reopen now,
