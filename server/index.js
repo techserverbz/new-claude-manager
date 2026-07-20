@@ -64,6 +64,8 @@ import {
   killAllTerminals,
   killSession,
   listLiveSessions,
+  liveSessionIds,
+  setLiveChangeListener,
   readSessionOutput,
   writeSessionInput,
   identityForToken,
@@ -1214,8 +1216,16 @@ watchers.sync(listProjects())
 // (a heavyweight claude per chat turn, on top of the persistent pty per session)
 // AND a corruption hazard (two processes resuming one session at once). Removing
 // it is what makes the app non-terminating no matter how many windows are open.
+// Broadcast the live-session set whenever a pty is born or dies, so every
+// client's "live" green dot reflects the ACTUAL running shells — not just which
+// sessions a given window happens to be showing. Switching/closing a pane keeps
+// the pty alive (4h keep-alive) and does NOT change this set, so the dot stays.
+setLiveChangeListener(() => broadcast({ type: 'live-sessions', ids: liveSessionIds() }))
+
 chatWss.on('connection', (ws) => {
   chatClients.add(ws)
+  // Seed the newcomer with the current live set so its dots are correct at once.
+  sendTo(ws, { type: 'live-sessions', ids: liveSessionIds() })
 
   // Parse-and-ignore: no client frame drives the server anymore. Kept as a
   // no-op so a stray/legacy frame can never crash the socket.

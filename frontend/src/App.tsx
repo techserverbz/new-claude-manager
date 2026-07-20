@@ -333,13 +333,23 @@ export default function App() {
      connected ids keyed by tab; we flatten + dedupe for the sidebar and the
      tab dots */
   const [paneActiveSessions, setPaneActiveSessions] = useState<Record<string, string[]>>({})
+  /* the authoritative live set pushed by the server (sessions with a live pty),
+     independent of which windows are open — so a session's green dot survives
+     switching/closing the pane that showed it, and clears only when its pty
+     actually exits or is reaped. */
+  const [serverLiveSessions, setServerLiveSessions] = useState<string[]>([])
+  /* green-dot source: the union of the server's live ptys and this client's
+     currently-connected panes (the latter covers the instant before the first
+     server push lands). serverLiveSessions is authoritative and a superset in
+     the steady state, but the union is harmless and avoids any first-paint gap. */
   const activeSessions = useMemo(() => {
     const set = new Set<string>()
     for (const ids of Object.values(paneActiveSessions)) {
       for (const id of ids) set.add(id)
     }
+    for (const id of serverLiveSessions) set.add(id)
     return [...set]
-  }, [paneActiveSessions])
+  }, [paneActiveSessions, serverLiveSessions])
 
   /* Sessions whose shell pty is stale because a CHAT turn appended messages the
      running (separate) claude process hasn't loaded. The shell re-resumes the
@@ -774,7 +784,11 @@ export default function App() {
        from a fresh chat — */
   useEffect(() => {
     return chatSocket.subscribe((ev) => {
-      if (ev.type === 'sessions-updated') {
+      if (ev.type === 'live-sessions') {
+        /* authoritative live-pty set from the server — drives the green dots so
+           they persist across pane switches and clear only on real exit/reap */
+        setServerLiveSessions(ev.ids)
+      } else if (ev.type === 'sessions-updated') {
         void refreshProjects()
       } else if (ev.type === 'session-created') {
         /* bind the fresh session onto the active 'New' tab so "Open in Shell"

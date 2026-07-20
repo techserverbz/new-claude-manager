@@ -48,6 +48,36 @@ function validDim(n) {
  */
 const ptySessions = new Map()
 
+// Live-session change listener. The set of sessions with a live pty changes ONLY
+// when a pty is spawned or dies (exit / reap / explicit terminate) — NOT when a
+// browser pane detaches. So switching or closing a window keeps a session's pty
+// alive and this list unchanged, which is what keeps its "live" green dot lit.
+// index.js registers a listener that broadcasts the list to all clients.
+let liveChangeCb = null
+export function setLiveChangeListener(fn) {
+  liveChangeCb = typeof fn === 'function' ? fn : null
+}
+function notifyLive() {
+  if (liveChangeCb) {
+    try {
+      liveChangeCb()
+    } catch {
+      /* a broken listener must never wedge the pty lifecycle */
+    }
+  }
+}
+
+/** The distinct real session ids that currently have a live (non-exited) pty.
+ *  This is the authoritative "which chats are live right now" — decoupled from
+ *  whether any browser window is currently viewing them. */
+export function liveSessionIds() {
+  const ids = new Set()
+  for (const entry of ptySessions.values()) {
+    if (!entry.exited && entry.sessionId) ids.add(entry.sessionId)
+  }
+  return [...ids]
+}
+
 // Per-chat SECRET token → its identity {projectId, sessionId}. The server mints
 // one when it spawns each claude and injects it as COS_SESSION_KEY; the
 // orchestrator authenticates callers by this token instead of trusting a
@@ -207,6 +237,7 @@ export function killSession(projectId, sessionId) {
   }
   ptySessions.delete(key)
   tokenToEntry.delete(entry.token)
+  notifyLive() // explicit terminate — this session is no longer live
   return true
 }
 
@@ -383,6 +414,7 @@ function attachWs(ws, entry, key, cols, rows) {
           /* already dead */
         }
         ptySessions.delete(key)
+        notifyLive() // reaped after the keep-alive window — no longer live
       }
     }, PTY_SESSION_TIMEOUT)
   })
@@ -455,6 +487,7 @@ export function handleTerminalConnection(ws, { project, sessionId, forceRestart 
       stale.exited = true
       ptySessions.delete(key)
       tokenToEntry.delete(stale.token)
+      notifyLive() // a fresh spawn below re-adds this id and notifies again
       try {
         stale.pty.kill()
       } catch {
@@ -523,6 +556,7 @@ export function handleTerminalConnection(ws, { project, sessionId, forceRestart 
   }
   entry.pty = term
   ptySessions.set(key, entry)
+  notifyLive() // a new live pty — light this session's "live" dot for all clients
 
   // Announce the minted id so the client adopts it: it reconnects under this id
   // (live AND after a reload) instead of the tab-local 'new:<n>', and the app
@@ -594,6 +628,7 @@ export function handleTerminalConnection(ws, { project, sessionId, forceRestart 
     // have already replaced it under the same key (whose pty we just killed).
     if (ptySessions.get(key) === entry) ptySessions.delete(key)
     tokenToEntry.delete(entry.token)
+    notifyLive() // the claude process exited — this session is no longer live
     sendToAll(entry, { type: 'exit', code: typeof exitCode === 'number' ? exitCode : 0 })
   })
 

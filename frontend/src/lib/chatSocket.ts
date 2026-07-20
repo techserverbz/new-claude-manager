@@ -38,6 +38,10 @@ export type ChatServerEvent =
   | { type: 'done'; sessionId: string | null }
   | { type: 'error'; error: string }
   | { type: 'sessions-updated'; projectId: string }
+  /* the authoritative set of sessions with a live pty right now — pushed on
+     every pty birth/death and on connect. Drives the "live" green dot so it
+     reflects real running shells, not just which windows are open. */
+  | { type: 'live-sessions'; ids: string[] }
 
 export type ChatSocketListener = (event: ChatServerEvent) => void
 

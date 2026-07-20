@@ -7,6 +7,7 @@
     "server"
   ],
   "scripts": {
+    "start": "concurrently -k -n server,web -c green,cyan \"npm run start -w server\" \"npm run dev -w frontend\"",
     "dev": "concurrently -k -n server,web -c green,cyan \"npm run dev -w server\" \"npm run dev -w frontend\"",
     "typecheck": "tsc --noEmit -p frontend"
   },
