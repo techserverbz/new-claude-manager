@@ -1405,6 +1405,7 @@ export default function App() {
           onNewSession={handleNewSession}
           onRenameProject={handleRenameProject}
           onRenameSession={handleRenameSession}
+          onSessionsChanged={refreshProjects}
           onTerminateSession={handleTerminateSession}
           onEditProject={(id) => setEditProjectId(id)}
           onChangeSessionId={(projectId, sessionId) =>

@@ -33,7 +33,7 @@ import { ChatContentModal } from './ChatContentModal'
 import { FolderPicker } from './FolderPicker'
 import { CanvasFilesPanel } from './CanvasFilesPanel'
 import { api, relativeTime } from '../lib/api'
-import type { CanvasFile, ChatGroup, ComputerSession, GroupChat, PortInfo, Project } from '../lib/api'
+import type { CanvasFile, ChatGroup, ComputerSession, GroupChat, PortInfo, Project, UpdateCheck } from '../lib/api'
 
 /** "…\Desktop\trying2" — last two path segments, for compact cwd display */
 function shortPath(p: string): string {
@@ -130,6 +130,7 @@ export function Sidebar({
   onNewSession,
   onRenameProject,
   onRenameSession,
+  onSessionsChanged,
   onTerminateSession,
   onEditProject,
   onChangeSessionId,
@@ -196,6 +197,9 @@ export function Sidebar({
   /** right-click rename — project display name / session custom title */
   onRenameProject: (id: string, name: string) => void
   onRenameSession: (projectId: string, sessionId: string, title: string) => void
+  /** nudge the parent to refetch the session catalog after a by-id rename, so
+      open-tab titles pick up the new name without a page reload */
+  onSessionsChanged?: () => void
   /** right-click "terminate terminal" — kill that session's live shell */
   onTerminateSession: (projectId: string, sessionId: string) => void
   /** right-click "edit project…" — open the full edit modal */
@@ -671,7 +675,17 @@ export function Sidebar({
         prev === null ? prev : prev.map((s) => (s.sessionId === sessionId ? { ...s, summary: t } : s)),
       )
     }
-    void api.renameSessionById(sessionId, t).catch(() => {})
+    void api
+      .renameSessionById(sessionId, t)
+      .then(() => {
+        /* the optimistic patch above only hits sessions ALREADY in the index; a
+           brand-new chat isn't there yet, so re-scan the global index so its new
+           title shows without a page reload. Also nudge the catalog so any open
+           tab for this chat refreshes its title. */
+        api.getAllSessions().then(setComputerSessions).catch(() => {})
+        onSessionsChanged?.()
+      })
+      .catch(() => {})
   }
   const commitRename = () => {
     if (editing === null) return
@@ -781,6 +795,18 @@ export function Sidebar({
   /* — settings modal (default-view toggle + ports) — */
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsTab, setSettingsTab] = useState<'general' | 'ports'>('general')
+  /* — "Check for updates": ask the server to compare against the GitHub repo — */
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheck | null>(null)
+  const handleCheckUpdates = () => {
+    setCheckingUpdate(true)
+    setUpdateCheck(null)
+    api
+      .checkUpdates()
+      .then(setUpdateCheck)
+      .catch(() => setUpdateCheck({ ok: false, error: 'Could not reach the server.' }))
+      .finally(() => setCheckingUpdate(false))
+  }
   useEffect(() => {
     if (!settingsOpen) return
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1613,6 +1639,53 @@ export function Sidebar({
                   <TerminalIcon className="h-3.5 w-3.5" aria-hidden="true" />
                   New Claude terminal
                 </button>
+              </div>
+
+              <div className="mt-6 border-t border-hairline-s pt-5">
+                <p className="font-mono text-[10px] uppercase tracking-[0.24em] text-sand">
+                  Updates
+                </p>
+                <p className="mt-1.5 font-display text-[13px] italic leading-relaxed text-sand">
+                  Check GitHub for a newer version of Claude Manager.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleCheckUpdates}
+                  disabled={checkingUpdate}
+                  className="mo-button mt-3 flex w-full items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <RefreshCw
+                    className={`h-3.5 w-3.5 ${checkingUpdate ? 'animate-spin' : ''}`}
+                    aria-hidden="true"
+                  />
+                  {checkingUpdate ? 'Checking…' : 'Check for Updates'}
+                </button>
+                {updateCheck !== null &&
+                  (!updateCheck.ok ? (
+                    <p className="mt-3 border border-[#cf6b52] px-3 py-2 font-mono text-[10px] leading-relaxed tracking-[0.1em] text-[#cf6b52]">
+                      Couldn't check: {updateCheck.error}
+                    </p>
+                  ) : updateCheck.upToDate ? (
+                    <p className="mt-3 border border-hairline px-3 py-2 font-mono text-[10px] leading-relaxed tracking-[0.1em] text-sand">
+                      ✓ Up to date — running the latest ({updateCheck.localCommit}).
+                    </p>
+                  ) : (
+                    <div className="mt-3 border border-brass px-3 py-2.5 font-mono text-[10px] leading-relaxed text-brass">
+                      <div className="uppercase tracking-[0.16em]">
+                        Update available · {updateCheck.behind} new commit
+                        {updateCheck.behind === 1 ? '' : 's'}
+                      </div>
+                      {updateCheck.latestSubject !== undefined && updateCheck.latestSubject !== '' && (
+                        <div className="mt-1.5 tracking-[0.02em] text-sand">
+                          Latest: {updateCheck.latestSubject}
+                        </div>
+                      )}
+                      <div className="mt-1.5 tracking-[0.02em] text-sand-dim">
+                        {updateCheck.localCommit} → {updateCheck.remoteCommit} · pull with{' '}
+                        <span className="text-sand">git pull</span>, then restart.
+                      </div>
+                    </div>
+                  ))}
               </div>
                 </>
               )}

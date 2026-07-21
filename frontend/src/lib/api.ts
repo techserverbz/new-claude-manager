@@ -42,6 +42,23 @@ export interface ComputerSession {
   projectName: string | null
 }
 
+/** result of checking GitHub for a newer version of the app */
+export interface UpdateCheck {
+  ok: boolean
+  /** present when ok: true */
+  upToDate?: boolean
+  behind?: number
+  ahead?: number
+  branch?: string
+  localCommit?: string
+  remoteCommit?: string
+  latestSubject?: string
+  remoteUrl?: string
+  checkedAt?: string
+  /** present when ok: false (not a git repo, offline, etc.) */
+  error?: string
+}
+
 /** a chat reference inside a Project group — keeps its OWN claude cwd */
 export interface GroupChat {
   sessionId: string
@@ -288,6 +305,11 @@ export const api = {
   async getAllSessions(): Promise<ComputerSession[]> {
     const { sessions } = await request<{ sessions: ComputerSession[] }>('/api/all-sessions')
     return sessions
+  },
+
+  /** check GitHub for a newer version of the app (git fetch + compare HEADs) */
+  async checkUpdates(): Promise<UpdateCheck> {
+    return request<UpdateCheck>('/api/updates/check')
   },
 
   /** search transcript CONTENT (reads the jsonl). Pass sessionIds to restrict the

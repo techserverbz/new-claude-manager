@@ -113,6 +113,68 @@ app.get('/api/config', (_req, res) => {
   res.json({ globalClaudeDir: GLOBAL_CLAUDE_DIR, home: HOME })
 })
 
+// The app's own git repo root (this file lives in <root>/server/).
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+
+/** Run a git command inside the app's repo. GIT_TERMINAL_PROMPT=0 makes auth
+ *  prompts fail fast instead of hanging the request. Resolves stdout (trimmed). */
+function runGit(args, timeout = 30000) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      'git',
+      args,
+      { cwd: REPO_ROOT, windowsHide: true, timeout, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } },
+      (err, stdout, stderr) => {
+        if (err) reject(new Error(String(stderr || err.message || 'git failed').trim()))
+        else resolve(String(stdout).trim())
+      },
+    )
+  })
+}
+
+// Check GitHub for a newer version: compare local HEAD against the remote branch
+// tip (a public repo, so `git fetch` needs no auth). Reports how many commits the
+// running copy is behind — i.e. whether there are updates to pull.
+app.get('/api/updates/check', async (_req, res) => {
+  try {
+    await runGit(['rev-parse', '--is-inside-work-tree'])
+    const branch = (await runGit(['rev-parse', '--abbrev-ref', 'HEAD']).catch(() => 'main')) || 'main'
+    const localCommit = await runGit(['rev-parse', 'HEAD'])
+    // fetch the remote branch tip; FETCH_HEAD is then the remote's latest commit
+    await runGit(['fetch', '--quiet', 'origin', branch])
+    const remoteCommit = await runGit(['rev-parse', 'FETCH_HEAD'])
+    const behind = Number.parseInt(await runGit(['rev-list', '--count', 'HEAD..FETCH_HEAD']), 10) || 0
+    const ahead = Number.parseInt(await runGit(['rev-list', '--count', 'FETCH_HEAD..HEAD']), 10) || 0
+    let latestSubject = ''
+    try {
+      latestSubject = await runGit(['log', '-1', '--format=%s', 'FETCH_HEAD'])
+    } catch {
+      /* subject is best-effort */
+    }
+    let remoteUrl = ''
+    try {
+      remoteUrl = await runGit(['remote', 'get-url', 'origin'])
+    } catch {
+      /* optional */
+    }
+    res.json({
+      ok: true,
+      upToDate: behind === 0,
+      behind,
+      ahead,
+      branch,
+      localCommit: localCommit.slice(0, 7),
+      remoteCommit: remoteCommit.slice(0, 7),
+      latestSubject,
+      remoteUrl,
+      checkedAt: new Date().toISOString(),
+    })
+  } catch (err) {
+    // not a git repo, offline, or no such remote branch — report gracefully
+    res.json({ ok: false, error: String(err?.message || 'Could not check for updates').slice(0, 300) })
+  }
+})
+
 // Directories Claude has already worked in (under ~/.claude/projects) — for the
 // "pick an existing project" picker when registering a project.
 app.get('/api/discover-projects', async (_req, res) => {
